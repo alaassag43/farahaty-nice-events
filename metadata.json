@@ -1,0 +1,12 @@
+{
+  "name": "فرحتي - Nice Events",
+  "description": "منصة متكاملة لتأجير معدات الأعراس الفاخرة، صممت خصيصاً لتناسب أجهزة الأندرويد بتجربة مستخدم سلسة.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ],
+  "orientation": "portrait",
+  "backgroundColor": "#000000",
+  "display": "fullscreen",
+  "themeColor": "#ec4899"
+}
