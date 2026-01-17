@@ -2,8 +2,8 @@
 import { createClient } from '@supabase/supabase-js';
 
 // يتم جلب البيانات من البيئة البرمجية، وفي حال عدم وجودها يتم استخدام قيم افتراضية للتطوير
-const supabaseUrl = process.env.SUPABASE_URL || 'https://demo.supabase.co';
-const supabaseKey = process.env.SUPABASE_ANON_KEY || 'demo-key-for-development';
+const supabaseUrl = process.env.SUPABASE_URL || 'https://nhjlwzwidmprbfkymlig.supabase.co';
+const supabaseKey = process.env.SUPABASE_ANON_KEY || 'sb_publishable_wjgWrle5o7WOR7MNdkStow_buZCxdlw';
 
 export const supabase = createClient(supabaseUrl, supabaseKey);
 
@@ -24,7 +24,7 @@ export const supabaseOperation = async (
           .select('*')
           .order('created_at', { ascending: false });
         if (getError) throw getError;
-        return getData;
+        return { success: true, data: getData };
 
       case 'set':
         const { data: setData, error: setError } = await supabase
@@ -41,7 +41,7 @@ export const supabaseOperation = async (
           .eq('id', id)
           .select();
         if (updateError) throw updateError;
-        return updateData;
+        return { success: true, data: updateData };
 
       case 'delete':
         const { error: deleteError } = await supabase
@@ -49,15 +49,15 @@ export const supabaseOperation = async (
           .delete()
           .eq('id', id);
         if (deleteError) throw deleteError;
-        return true;
+        return { success: true, data: true };
 
       default:
-        return null;
+        return { success: false, error: 'Invalid operation type' };
     }
   } catch (error) {
     console.error(`Supabase Error [${table}]:`, error);
     // العودة للبيانات المحلية في حال فشل الاتصال (اختياري)
-    return null;
+    return { success: false, error: error.message };
   }
 };
 
@@ -88,7 +88,19 @@ export const subscribeToProducts = (callback: (products: any[]) => void) => {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, (payload) => {
       console.log('Products change:', payload);
       // إعادة جلب البيانات عند أي تغيير
-      supabaseOperation('get', 'products').then(callback);
+      supabaseOperation('get', 'products').then(res => res.success ? callback(res.data) : null);
+    })
+    .subscribe();
+};
+
+// اشتراك في تحديثات الفئات
+export const subscribeToCategories = (callback: (categories: any[]) => void) => {
+  return supabase
+    .channel('categories_changes')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'categories' }, (payload) => {
+      console.log('Categories change:', payload);
+      // إعادة جلب البيانات عند أي تغيير
+      supabaseOperation('get', 'categories').then(res => res.success ? callback(res.data) : null);
     })
     .subscribe();
 };
@@ -100,7 +112,7 @@ export const subscribeToBookings = (callback: (bookings: any[]) => void) => {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'bookings' }, (payload) => {
       console.log('Bookings change:', payload);
       // إعادة جلب البيانات عند أي تغيير
-      supabaseOperation('get', 'bookings').then(callback);
+      supabaseOperation('get', 'bookings').then(res => res.success ? callback(res.data) : null);
     })
     .subscribe();
 };
@@ -112,7 +124,7 @@ export const subscribeToCustomerCodes = (callback: (codes: any[]) => void) => {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'customer_codes' }, (payload) => {
       console.log('Customer codes change:', payload);
       // إعادة جلب البيانات عند أي تغيير
-      supabaseOperation('get', 'customer_codes').then(callback);
+      supabaseOperation('get', 'customer_codes').then(res => res.success ? callback(res.data) : null);
     })
     .subscribe();
 };
@@ -124,7 +136,7 @@ export const subscribeToMessages = (callback: (messages: any[]) => void) => {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'chat_messages' }, (payload) => {
       console.log('Messages change:', payload);
       // إعادة جلب البيانات عند أي تغيير
-      supabaseOperation('get', 'chat_messages').then(callback);
+      supabaseOperation('get', 'chat_messages').then(res => res.success ? callback(res.data) : null);
     })
     .subscribe();
 };

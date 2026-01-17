@@ -51,21 +51,27 @@ export default function App() {
   useEffect(() => {
     const setupSync = async () => {
       // 1. جلب البيانات الأولية
-      const [cats, prods, codes, bks, msgs, appContent] = await Promise.all([
+      const [catsRes, prodsRes, codesRes, bksRes, msgsRes, appContentRes] = await Promise.all([
         supabaseOperation('get', 'categories'),
         supabaseOperation('get', 'products'),
-        supabaseOperation('get', 'codes'),
+        supabaseOperation('get', 'customer_codes'),
         supabaseOperation('get', 'bookings'),
         supabaseOperation('get', 'chat_messages'),
         supabaseOperation('get', 'app_content'),
       ]);
 
-      if (cats) setCategories(cats);
-      if (prods) setProducts(prods);
-      if (codes) setCustomerCodes(codes);
-      if (bks) setBookings(bks);
-      if (msgs) setChatMessages(msgs);
-      if (appContent && appContent.length > 0) setContent(appContent[0]);
+      if ((catsRes as any).success) setCategories((catsRes as any).data || []);
+      else setCategories([]);
+      if ((prodsRes as any).success) setProducts((prodsRes as any).data || []);
+      else setProducts([]);
+      if ((codesRes as any).success) setCustomerCodes((codesRes as any).data || []);
+      else setCustomerCodes([]);
+      if ((bksRes as any).success) setBookings((bksRes as any).data || []);
+      else setBookings([]);
+      if ((msgsRes as any).success) setChatMessages((msgsRes as any).data || []);
+      else setChatMessages([]);
+      if ((appContentRes as any).success && (appContentRes as any).data && (appContentRes as any).data.length > 0) setContent((appContentRes as any).data[0]);
+      else setContent(INITIAL_CONTENT);
 
       setIsLoading(false);
 
@@ -153,7 +159,11 @@ export default function App() {
       items: cart.map(i => ({ productId: i.product.id, quantity: i.quantity, name: i.product.name })),
       depositAmount: total * 0.2
     };
-    await supabaseOperation('set', 'bookings', newBooking, id);
+    const res = await supabaseOperation('set', 'bookings', newBooking, id);
+    if (!res.success) {
+      showToast(res.error, 'error');
+      return;
+    }
     setCart([]);
     navigate(`/booking-status/${id}`);
     showToast('تم إرسال طلب الحجز بنجاح');
@@ -493,7 +503,7 @@ function AdminCardGenerator({ onRefresh, isDarkMode }: any) {
     const qr = await QRCode.toDataURL(newCode, { margin: 1, width: 400 });
     setGeneratedCode(newCode);
     setQrDataUrl(qr);
-    await supabaseOperation('set', 'codes', { id, code: newCode, customerName, isActive: true, status: 'approved', createdAt: new Date().toISOString(), walletBalance: 0 }, id);
+    await supabaseOperation('set', 'customer_codes', { id, code: newCode, customerName, isActive: true, status: 'approved', createdAt: new Date().toISOString(), walletBalance: 0 }, id);
     onRefresh();
   };
 
@@ -567,7 +577,7 @@ function AdminBookingManager({ bookings, onRefresh, isDarkMode }: any) {
 function AdminCodesManager({ codes, onRefresh, isDarkMode }: any) {
   const approve = async (id: string) => {
     const code = `NICE-${Math.floor(1000 + Math.random() * 8999)}`;
-    await supabaseOperation('update', 'codes', { status: 'approved', isActive: true, code }, id);
+    await supabaseOperation('update', 'customer_codes', { status: 'approved', isActive: true, code }, id);
     onRefresh();
   };
   return (
@@ -578,7 +588,7 @@ function AdminCodesManager({ codes, onRefresh, isDarkMode }: any) {
              <div key={c.id} className={`${isDarkMode ? 'bg-gray-900 border-gray-800 text-white' : 'bg-white border-gray-100'} p-6 rounded-[2.5rem] border shadow-sm flex items-center justify-between`}>
                 <div className="flex gap-2">
                    {c.status === 'pending' && <button onClick={()=>approve(c.id)} className="p-3 bg-green-500 text-white rounded-xl shadow-lg transition-transform active:scale-90"><UserCheck size={20}/></button>}
-                   <button onClick={async () => {if(confirm('حذف الوصول؟')){await supabaseOperation('delete','codes',null,c.id); onRefresh();}}} className={`p-3 rounded-xl transition-all ${isDarkMode ? 'bg-red-900/20 text-red-400 hover:bg-red-900/40' : 'bg-red-50 text-red-500 hover:bg-red-100'}`}><Trash2 size={20}/></button>
+    await supabaseOperation('delete','customer_codes',null,c.id);
                 </div>
                 <div className="text-right">
                    <p className="font-black text-xs uppercase tracking-tighter">{c.customerName}</p>
