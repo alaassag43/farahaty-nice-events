@@ -1,15 +1,15 @@
 
 import { initializeApp } from 'firebase/app';
-import { getFirestore, collection, doc, setDoc, getDocs, updateDoc, deleteDoc, query, orderBy, limit, onSnapshot, where } from 'firebase/firestore';
+import { getFirestore, collection, doc, setDoc, getDocs, getDoc, updateDoc, deleteDoc, query, orderBy, limit, onSnapshot, where, enableIndexedDbPersistence } from 'firebase/firestore';
 import { getStorage, ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 
 const firebaseConfig = {
-  apiKey: "AIzaSyAxk-19S_g7Ad9PMydLmLsRDIf-va5ZsNg",
-  authDomain: "farahaty-nice-events.firebaseapp.com",
-  projectId: "farahaty-nice-events",
-  storageBucket: "farahaty-nice-events.firebasestorage.app",
-  messagingSenderId: "975596848066",
-  appId: "1:975596848066:web:d58f45564abebcb31acc5b"
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "AIzaSyAxk-19S_g7Ad9PMydLmLsRDIf-va5ZsNg",
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "farahaty-nice-events.firebaseapp.com",
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "farahaty-nice-events",
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "farahaty-nice-events.firebasestorage.app",
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "975596848066",
+  appId: import.meta.env.VITE_FIREBASE_APP_ID || "1:975596848066:web:d58f45564abebcb31acc5b"
 };
 
 let db: any = null;
@@ -20,6 +20,18 @@ try {
     const app = initializeApp(firebaseConfig);
     db = getFirestore(app);
     storage = getStorage(app);
+
+    // Enable IndexedDB persistence for offline support
+    enableIndexedDbPersistence(db).catch((err) => {
+      if (err.code === 'failed-precondition') {
+        console.warn('Multiple tabs open, persistence can only be enabled in one tab at a time.');
+      } else if (err.code === 'unimplemented') {
+        console.warn('The current browser does not support all of the features required to enable persistence');
+      }
+    });
+
+// تهيئة الجداول المطلوبة في Firebase
+initializeFirebaseCollections().catch(console.error);
   }
 } catch (e) {
   console.warn("Firebase initialization failed, using local mock mode.");
@@ -68,7 +80,7 @@ export const dbOperation = async (type: 'get' | 'set' | 'update' | 'delete', col
       return newData;
     }
     return localData;
-  }
+  } 
 
   try {
     const colRef = collection(db, colName);
@@ -93,3 +105,70 @@ export const dbOperation = async (type: 'get' | 'set' | 'update' | 'delete', col
     return null;
   }
 };
+
+// Firebase Auto-Initialization Feature
+async function initializeFirebaseCollections() {
+  if (!db) return;
+
+  console.log('🔥 Starting Firebase Auto-Initialization...');
+
+  try {
+    // 1. Check and initialize app_settings/main document
+    const appSettingsRef = doc(db, 'app_settings', 'main');
+    const appSettingsDoc = await getDoc(appSettingsRef);
+
+    if (!appSettingsDoc.exists()) {
+      // Create default app settings
+      const defaultSettings = {
+        sar_to_yer: 140,
+        sar_to_usd: 0.27,
+        maintenance_mode: false,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      };
+
+      await setDoc(appSettingsRef, defaultSettings);
+      console.log('✅ Default app settings initialized in Firebase.');
+    } else {
+      console.log('✅ App settings document exists.');
+    }
+
+    // 2. Initialize required collections (ensure they exist)
+    const requiredCollections = [
+      'products',
+      'categories',
+      'bookings',
+      'customer_codes',
+      'chat_messages',
+      'analytics_events',
+      'coupons',
+      'notifications',
+    ];
+
+    for (const col of requiredCollections) {
+      try {
+        // Check if collection exists by trying to get documents
+        const snap = await getDocs(collection(db, col));
+        if (snap.empty) {
+          // Add initialization document to create the collection
+          await setDoc(doc(db, col, '__init__'), {
+            created_at: new Date().toISOString(),
+            init: true
+          });
+          console.log(`✅ Collection '${col}' initialized in Firebase.`);
+        } else {
+          console.log(`✅ Collection '${col}' exists.`);
+        }
+      } catch (err) {
+        console.error(`❌ Error initializing collection '${col}':`, err);
+      }
+    }
+
+    console.log('🎉 Firebase Auto-Initialization completed successfully!');
+    console.log('📊 Database structure verified and ready.');
+
+  } catch (error) {
+    console.error('❌ Firebase Auto-Initialization failed:', error);
+    console.warn('⚠️ App will continue with local fallback mode.');
+  }
+}

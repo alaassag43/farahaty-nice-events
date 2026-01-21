@@ -6,7 +6,7 @@ import { ThemeSwitcher } from "@/components/theme-switcher";
 import { ConnectSupabaseSteps } from "@/components/tutorial/connect-supabase-steps";
 import { SignUpUserSteps } from "@/components/tutorial/sign-up-user-steps";
 import { hasEnvVars } from "@/lib/utils";
-import Link from "next/link";
+// import Link from "next/link";
 import { Suspense } from "react";
 
 export default function Home() {
@@ -16,7 +16,7 @@ export default function Home() {
         <nav className="w-full flex justify-center border-b border-b-foreground/10 h-16">
           <div className="w-full max-w-5xl flex justify-between items-center p-3 px-5 text-sm">
             <div className="flex gap-5 items-center font-semibold">
-              <Link href={"/"}>Next.js Supabase Starter</Link>
+              <a href="/">Next.js Supabase Starter</a>
               <div className="flex items-center gap-2">
                 <DeployButton />
               </div>
@@ -45,7 +45,7 @@ export default function Home() {
               href="https://supabase.com/?utm_source=create-next-app&utm_medium=template&utm_term=nextjs"
               target="_blank"
               className="font-bold hover:underline"
-              rel="noreferrer"
+              rel="noopener noreferrer"
             >
               Supabase
             </a>

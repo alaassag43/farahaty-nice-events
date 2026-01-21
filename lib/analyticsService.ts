@@ -114,7 +114,7 @@ export class AnalyticsService {
         }
       });
 
-      summary.uniqueUsers = summary.uniqueUsers.size;
+      (summary.uniqueUsers as any) = summary.uniqueUsers.size;
 
       return summary;
     } catch (error) {

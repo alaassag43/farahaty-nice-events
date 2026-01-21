@@ -11,27 +11,117 @@ import {
   Menu, Send, TrendingUp, Layers, Sun, Moon, BarChart3,
   Save, Eye, UserPlus, Key, MapPin, ArrowRight, Star, Printer, ChevronLeft,
   MessageSquare, Folders, Search, Info, Download, Copy, Share2, Filter, ShoppingBag,
-  Image as ImageIcon, ToggleLeft, ToggleRight, AlertCircle, Phone, DollarSign, CalendarCheck
+  Image as ImageIcon, ToggleLeft, ToggleRight, AlertCircle, Phone, DollarSign, CalendarCheck, Bell
 } from 'lucide-react';
 
-// المكاواع (يفترض وجودها في ملفات constants.ts و types.ts)
+// (تم نقل جميع الاستيرادات للأعلى)
+// --- User Settings View (إعدادات المستخدم) ---
+
 import { Product, Category, Section, Booking, UserRole, AppContent, CustomerCode, ChatMessage } from './types';
 import { INITIAL_CONTENT } from './constants';
-import { supabase, supabaseOperation, subscribeToProducts, subscribeToCategories, subscribeToBookings, subscribeToCustomerCodes, subscribeToMessages } from './lib/supabase';
-import { CustomerCodeService } from './lib/customerCodeService';
+import { dbOperation, onSnapshot, collection, db, uploadFile } from './lib/firebase';
+import { NotificationService } from './lib/notificationService';
 
 // --- وظائف المساعدة العامة ---
-
 const saveToLocal = (key: string, data: any) => localStorage.setItem(`nice_v5_${key}`, JSON.stringify(data));
 const getFromLocal = (key: string, fallback: any) => {
   const saved = localStorage.getItem(`nice_v5_${key}`);
   try { return saved ? JSON.parse(saved) : fallback; } catch { return fallback; }
 };
-
-const formatCurrency = (amount: number) => `${Math.floor(amount).toLocaleString('ar-SA')} ر.س`;
+const formatCurrency = (amount: number, currency: string = 'SAR') => {
+  const symbols = {
+    SAR: 'ر.س',
+    YER: 'ر.ي',
+    USD: '$'
+  };
+  const locales = {
+    SAR: 'ar-SA',
+    YER: 'ar-YE',
+    USD: 'en-US'
+  };
+  return `${Math.floor(amount).toLocaleString(locales[currency as keyof typeof locales])} ${symbols[currency as keyof typeof symbols]}`;
+};
 const formatDate = (isoString: string) => new Date(isoString).toLocaleDateString('ar-SA', { day: 'numeric', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit' });
 
-// --- المكون الرئيسي App ---
+// Currency conversion function
+const getConvertedPrice = (price: number, fromCurrency: string = 'SAR', toCurrency: string = 'SAR', exchangeRates: any = {}) => {
+  if (fromCurrency === toCurrency) return price;
+
+  // Convert to SAR first if needed
+  let priceInSAR = price;
+  if (fromCurrency === 'YER') priceInSAR = price / (exchangeRates.sar_to_yer || 140);
+  if (fromCurrency === 'USD') priceInSAR = price / (exchangeRates.sar_to_usd || 0.27);
+
+  // Convert from SAR to target currency
+  if (toCurrency === 'YER') return priceInSAR * (exchangeRates.sar_to_yer || 140);
+  if (toCurrency === 'USD') return priceInSAR * (exchangeRates.sar_to_usd || 0.27);
+
+  return priceInSAR;
+};
+
+// --- User Settings View (إعدادات المستخدم) --- 
+
+function UserSettingsView({ user, isDarkMode, onLogout, selectedCurrency, selectedCountry, onCurrencyChange, onCountryChange }: any) {
+  const [language, setLanguage] = useState('ar');
+
+  return (
+    <div className={`p-6 space-y-8 text-right animate-fade pb-24 ${isDarkMode ? 'bg-gray-950 text-white' : ''}`}>
+      <h2 className="text-3xl font-black italic">إعدادات المستخدم</h2>
+
+      {/* Country and Currency Selection */}
+      <div className={`p-8 rounded-[3rem] border shadow-xl space-y-8 ${isDarkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-100'}`}>
+        <h3 className="text-xl font-black italic text-pink-600">اختر الدولة والعملة</h3>
+
+        <div className="space-y-4">
+          <p className="text-[10px] font-black text-gray-400 pr-4 uppercase">اختر الدولة والعملة</p>
+          <div className="grid grid-cols-3 gap-3">
+            <button
+              onClick={() => onCountryChange('SA')}
+              className={`p-4 rounded-2xl font-bold text-sm transition-all ${selectedCountry === 'SA' ? 'bg-green-500 text-white' : isDarkMode ? 'bg-gray-700 text-gray-300' : 'bg-gray-100 text-gray-700'}`}
+            >
+              السعودية 🇸🇦<br/>ريال سعودي
+            </button>
+            <button
+              onClick={() => onCountryChange('YE')}
+              className={`p-4 rounded-2xl font-bold text-sm transition-all ${selectedCountry === 'YE' ? 'bg-red-500 text-white' : isDarkMode ? 'bg-gray-700 text-gray-300' : 'bg-gray-100 text-gray-700'}`}
+            >
+              اليمن 🇾🇪<br/>ريال يمني
+            </button>
+            <button
+              onClick={() => onCountryChange('US')}
+              className={`p-4 rounded-2xl font-bold text-sm transition-all ${selectedCountry === 'US' ? 'bg-blue-500 text-white' : isDarkMode ? 'bg-gray-700 text-gray-300' : 'bg-gray-100 text-gray-700'}`}
+            >
+              أمريكا 🇺🇸<br/>دولار أمريكي
+            </button>
+          </div>
+        </div>
+
+        <div className="space-y-4">
+          <p className="text-[10px] font-black text-gray-400 pr-4 uppercase">العملة المختارة حالياً</p>
+          <div className="flex items-center gap-3 p-4 bg-pink-50 rounded-2xl">
+            <span className="text-lg font-black text-pink-600">
+              {selectedCountry === 'SA' ? 'ريال سعودي (SAR)' : selectedCountry === 'YE' ? 'ريال يمني (YER)' : 'دولار أمريكي (USD)'}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* User Info */}
+      <div className={`p-8 rounded-[3rem] border shadow-xl ${isDarkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-100'}`}>
+        <h3 className="text-xl font-black italic text-pink-600 mb-4">معلومات المستخدم</h3>
+        <p className="text-lg font-bold">مرحباً {user?.customer_name || 'مستخدم'}!</p>
+        <p className={`text-sm mt-2 ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>الكود: {user?.code}</p>
+      </div>
+
+      {/* Logout Button */}
+      <div className="flex justify-center">
+        <button onClick={onLogout} className="w-full py-6 bg-red-500 text-white rounded-[2rem] font-black italic shadow-xl hover:bg-red-600 transition-all flex items-center justify-center gap-2">
+          <LogOut size={20} /> تسجيل الخروج
+        </button>
+      </div>
+    </div>
+  );
+}
 
 export default function App() {
   const [role, setRole] = useState<UserRole | null>(() => getFromLocal('userRole', null));
@@ -50,79 +140,166 @@ export default function App() {
   const [isAdminDrawerOpen, setIsAdminDrawerOpen] = useState(false);
   const [isSupportOpen, setIsSupportOpen] = useState(false);
   const [isScannerOpen, setIsScannerOpen] = useState(false);
+  const [selectedCurrency, setSelectedCurrency] = useState<'SAR' | 'YER' | 'USD'>('SAR');
+  const [selectedCountry, setSelectedCountry] = useState<'SA' | 'YE' | 'US'>('SA');
+  const [exchangeRates, setExchangeRates] = useState<any>({ sar_to_yer: 140, sar_to_usd: 0.27 });
+  const [userPreferredCurrency, setUserPreferredCurrency] = useState<'SAR' | 'YER' | 'USD'>('SAR');
+
+  // Real-time listeners for app_settings, bookings, and customer_codes are set up in setupSync
+
+  // Save user settings to Firebase
+  const saveUserSettings = async (currency: string, country: string) => {
+    if (!userSession?.id) return;
+    try {
+      await dbOperation('set', 'user_settings', {
+        user_id: userSession.id,
+        selectedCurrency: currency,
+        selectedCountry: country,
+        updated_at: new Date().toISOString()
+      }, userSession.id);
+    } catch (error) {
+      console.error('Error saving user settings:', error);
+    }
+  };
+
+  const handleCurrencyChange = (currency: 'SAR' | 'YER' | 'USD') => {
+    setSelectedCurrency(currency);
+    saveUserSettings(currency, selectedCountry);
+  };
+
+  const handleCountryChange = (country: 'SA' | 'YE' | 'US') => {
+    setSelectedCountry(country);
+    saveUserSettings(selectedCurrency, country);
+  };
+  const [unreadNotificationsCount, setUnreadNotificationsCount] = useState(0);
 
   const navigate = useNavigate();
   const location = useLocation();
 
   const showToast = (message: string, type: 'success' | 'error' = 'success') => setMsg({ message, type });
 
-  // إعداد التزامن اللحظي مع Supabase
+  // دالة إعادة جلب البيانات
+  const refreshData = async () => {
+    try {
+      const [catsRes, prodsRes, codesRes, bksRes, msgsRes, appSettingsRes] = await Promise.all([
+        dbOperation('get', 'categories'),
+        dbOperation('get', 'products'),
+        dbOperation('get', 'customer_codes'),
+        dbOperation('get', 'bookings'),
+        dbOperation('get', 'chat_messages'),
+        dbOperation('get', 'app_settings'),
+      ]);
+
+      if (catsRes) setCategories(catsRes || []);
+      if (prodsRes) setProducts(prodsRes || []);
+      if (codesRes) setCustomerCodes(codesRes || []);
+      if (bksRes) setBookings(bksRes || []);
+      if (msgsRes) setChatMessages(msgsRes || []);
+
+      let contentData = INITIAL_CONTENT;
+      if (appSettingsRes && appSettingsRes.length > 0) {
+        contentData = appSettingsRes[0];
+      }
+      setContent(contentData);
+    } catch (error) {
+      console.error('خطأ في إعادة جلب البيانات:', error);
+    }
+  };
+
+  // إعداد التزامن اللحظي مع Firebase
   useEffect(() => {
     const setupSync = async () => {
       try {
         // 1. جلب البيانات الأولية
-        // ✅ تم تصحيح: تغيير 'app_content' إلى 'app_settings' لـ (404 fix)
-        const [catsRes, prodsRes, codesRes, bksRes, msgsRes, appSettingsRes] = await Promise.all([
-          supabaseOperation('get', 'categories'),
-          supabaseOperation('get', 'products'),
-          supabaseOperation('get', 'customer_codes'),
-          supabaseOperation('get', 'bookings'),
-          supabaseOperation('get', 'chat_messages'),
-          supabaseOperation('get', 'app_settings', undefined, undefined, { select: 'id, admin_password, main_welcome_message, whatsapp_link, created_at, updated_at' }),
+        const [catsRes, prodsRes, msgsRes] = await Promise.all([
+          dbOperation('get', 'categories'),
+          dbOperation('get', 'products'),
+          dbOperation('get', 'chat_messages'),
         ]);
 
-        // محاولة مزامنة الأكواد المحلية مع قاعدة البيانات
-        try {
-          await CustomerCodeService.syncLocalCodesToDatabase();
-        } catch (error) {
-          console.log('Local codes sync skipped (database not available):', error);
-        }
-
-        if ((catsRes as any).success) setCategories((catsRes as any).data || []);
+        if (catsRes) setCategories(catsRes || []);
         else setCategories([]);
-        if ((prodsRes as any).success) setProducts((prodsRes as any).data || []);
+        if (prodsRes) setProducts(prodsRes || []);
         else setProducts([]);
-        if ((codesRes as any).success) setCustomerCodes((codesRes as any).data || []);
-        else setCustomerCodes([]);
-        if ((bksRes as any).success) setBookings((bksRes as any).data || []);
-        else setBookings([]);
-        if ((msgsRes as any).success) setChatMessages((msgsRes as any).data || []);
+        if (msgsRes) setChatMessages(msgsRes || []);
         else setChatMessages([]);
-
-        // تحسين معالجة app_settings
-        let contentData = INITIAL_CONTENT;
-        if ((appSettingsRes as any).success && (appSettingsRes as any).data && (appSettingsRes as any).data.length > 0) {
-          contentData = (appSettingsRes as any).data[0];
-        } else {
-          // إذا لم يكن موجوداً، أنشئ سجلاً افتراضياً
-          // ✅ تم تصحيح: تغيير 'app_content' إلى 'app_settings'
-          const defaultContent = { ...INITIAL_CONTENT, id: 'main' };
-          await supabaseOperation('set', 'app_settings', defaultContent, 'main');
-          contentData = defaultContent;
-        }
-        setContent(contentData);
 
         setIsLoading(false);
 
-        // 2. الاشتراك في التغييرات اللحظية باستخدام الدوال المخصصة
-        const channelProducts = subscribeToProducts((products) => setProducts(products));
-        const channelCategories = subscribeToCategories((categories) => setCategories(categories));
-        const channelBookings = subscribeToBookings((bookings) => setBookings(bookings));
-        const channelCustomerCodes = subscribeToCustomerCodes((codes) => {
-          setCustomerCodes(codes);
+        // 2. إعداد Firebase onSnapshot listeners للمنتجات والفئات والرسائل
+        const unsubscribeProducts = onSnapshot(collection(db, 'products'), (snapshot) => {
+          const productsData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Product));
+          setProducts(productsData);
+        });
+
+        const unsubscribeCategories = onSnapshot(collection(db, 'categories'), (snapshot) => {
+          const categoriesData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Category));
+          setCategories(categoriesData);
+        });
+
+        const unsubscribeMessages = onSnapshot(collection(db, 'chat_messages'), (snapshot) => {
+          const messagesData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as ChatMessage));
+          setChatMessages(messagesData);
+        });
+
+        // 3. إعداد Firebase onSnapshot listeners لـ bookings, customer_codes, و app_settings
+        const unsubscribeBookings = onSnapshot(collection(db, 'bookings'), (snapshot) => {
+          const bookingsData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Booking));
+          setBookings(bookingsData);
+
+          // Sound notification for new bookings
+          snapshot.docChanges().forEach((change) => {
+            if (change.type === 'added') {
+              // Play notification sound for new booking
+              const audio = new Audio('https://www.soundjay.com/misc/sounds/bell-ringing-05.wav');
+              audio.volume = 0.5;
+              audio.play().catch(e => console.log('Audio play failed:', e));
+            }
+          });
+        });
+
+        const unsubscribeCustomerCodes = onSnapshot(collection(db, 'customer_codes'), (snapshot) => {
+          const codesData = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as CustomerCode));
+          setCustomerCodes(codesData);
           if (userSession) {
-            const current = codes.find(c => c.id === userSession.id);
+            const current = codesData.find(c => c.id === userSession.id);
             if (current) setUserSession(current);
           }
         });
-        const channelMessages = subscribeToMessages((messages) => setChatMessages(messages));
+
+        const unsubscribeAppSettings = onSnapshot(collection(db, 'app_settings'), (snapshot) => {
+          snapshot.docs.forEach((doc) => {
+            const data = doc.data();
+            if (data.exchange_rates) {
+              setExchangeRates(data.exchange_rates);
+            }
+            // Update content for admin settings
+            setContent(prevContent => ({
+              ...prevContent,
+              admin_password: data.admin_password || prevContent.admin_password,
+              main_welcome_message: data.main_welcome_message || prevContent.main_welcome_message,
+              whatsapp_link: data.whatsapp_link || prevContent.whatsapp_link,
+            }));
+          });
+        });
+
+        // جلب عدد الإشعارات غير المقروءة للمستخدم
+        if (userSession?.id) {
+          try {
+            const stats = await NotificationService.getNotificationStats(userSession.id);
+            setUnreadNotificationsCount(stats.unread);
+          } catch (error) {
+            console.log('Failed to fetch notification stats:', error);
+          }
+        }
 
         return () => {
-          channelProducts.unsubscribe();
-          channelCategories.unsubscribe();
-          channelBookings.unsubscribe();
-          channelCustomerCodes.unsubscribe();
-          channelMessages.unsubscribe();
+          unsubscribeProducts();
+          unsubscribeCategories();
+          unsubscribeMessages();
+          unsubscribeBookings();
+          unsubscribeCustomerCodes();
+          unsubscribeAppSettings();
         };
       } catch (error) {
         console.error('خطأ في إعداد التزامن:', error);
@@ -146,7 +323,9 @@ export default function App() {
     saveToLocal('userSession', userSession);
     saveToLocal('cart', cart);
     saveToLocal('darkMode', isDarkMode);
-  }, [role, userSession, cart, isDarkMode]);
+    saveToLocal('selectedCurrency', selectedCurrency);
+    saveToLocal('selectedCountry', selectedCountry);
+  }, [role, userSession, cart, isDarkMode, selectedCurrency, selectedCountry]);
 
   const handleVerify = async (code: string) => {
     if (code === (content.admin_password || 'ADMIN123')) {
@@ -193,17 +372,28 @@ export default function App() {
       location: 'سيتم التحديد عند التواصل',
       created_at: new Date().toISOString(),
       items: cart.map(i => ({ productId: i.product.id, quantity: i.quantity, name: i.product.name })),
-      deposit_amount: total * 0.2
+      deposit_amount: total * 0.2,
+      event_date: '',
+      event_time: ''
     };
-    const res = await supabaseOperation('set', 'bookings', newBooking, id);
-    if (!(res as any).success) {
-      showToast((res as any).error, 'error');
+    const res = await dbOperation('set', 'bookings', newBooking, id);
+    if (!res) {
+      showToast('فشل في إرسال طلب الحجز', 'error');
       return;
     }
     setCart([]);
     navigate(`/booking-status/${id}`);
     showToast('تم إرسال طلب الحجز بنجاح');
   };
+
+  useEffect(() => {
+    // تحقق إذا تم تفعيل كود المستخدم أثناء الانتظار
+    if (role === UserRole.USER && userSession && userSession.status === 'approved') {
+      showToast('تمت الموافقة على طلبك! يمكنك الآن الدخول واستخدام الكود.');
+      // يمكن هنا عرض نافذة الباركود أو إعادة توجيه المستخدم تلقائياً
+      // navigate('/store');
+    }
+  }, [role, userSession]);
 
   if (showSplash) return <SplashScreen onFinish={() => setShowSplash(false)} />;
   if (isLoading) return <LoadingScreen />;
@@ -235,6 +425,12 @@ export default function App() {
                {chatMessages.filter(m => !m.is_read && m.sender_type === 'customer' && role === UserRole.ADMIN).length > 0 && <span className="absolute top-1 right-1 w-2 h-2 bg-red-500 rounded-full animate-ping"></span>}
             </button>
             {role === UserRole.USER && (
+              <Link to="/notifications" className="p-3 bg-amber-50 text-amber-600 rounded-2xl relative active:scale-90 transition-transform">
+                <Bell size={20} />
+                {unreadNotificationsCount > 0 && <span className="absolute -top-1 -right-1 w-5 h-5 bg-red-500 rounded-full text-[9px] flex items-center justify-center font-black text-white">{unreadNotificationsCount}</span>}
+              </Link>
+            )}
+            {role === UserRole.USER && (
               <Link to="/cart" className="p-3 bg-black text-white rounded-2xl relative active:scale-90 transition-transform">
                 <ShoppingCart size={20} />
                 {cart.length > 0 && <span className="absolute -top-1 -right-1 w-5 h-5 bg-pink-500 rounded-full text-[9px] flex items-center justify-center font-black border-2 border-white">{cart.length}</span>}
@@ -249,7 +445,7 @@ export default function App() {
           <Route path="/" element={role ? <Navigate to={role === UserRole.ADMIN ? "/admin" : "/store"} replace /> : <Navigate to="/access" replace />} />
           <Route path="/access" element={<AccessGateView onVerify={handleVerify} onScan={() => setIsScannerOpen(true)} onRequest={async (n, p) => {
             const id = `USR-${Date.now()}`;
-            await supabaseOperation('set', 'customer_codes', { id, customer_name: n, user_phone: p, status: 'pending', is_active: false, wallet_balance: 0, code: 'PENDING', created_at: new Date().toISOString() }, id);
+            await dbOperation('set', 'customer_codes', { id, customer_name: n, user_phone: p, status: 'pending', is_active: false, wallet_balance: 0, code: 'PENDING', created_at: new Date().toISOString() }, id);
             navigate('/access-pending');
           }} isDarkMode={isDarkMode} />} />
           <Route path="/access-pending" element={<AccessPendingView isDarkMode={isDarkMode} />} />
@@ -266,11 +462,13 @@ export default function App() {
 
           <Route path="/bookings" element={<ProtectedRoute role={role}><UserBookingsView bookings={bookings} userId={userSession?.id} isDarkMode={isDarkMode} /></ProtectedRoute>} />
           
-          <Route path="/admin/*" element={<ProtectedRoute role={role} adminOnly><AdminRoutes products={products} categories={categories} bookings={bookings} codes={customerCodes} content={content} onRefresh={() => {}} isDarkMode={isDarkMode} /></ProtectedRoute>} />
+          <Route path="/admin/*" element={<ProtectedRoute role={role} adminOnly><AdminRoutes products={products} categories={categories} bookings={bookings} codes={customerCodes} content={content} onRefresh={refreshData} isDarkMode={isDarkMode} setProducts={setProducts} setCategories={setCategories} /></ProtectedRoute>} />
           
-          <Route path="/cart" element={<ProtectedRoute role={role}><CartPageView cart={cart} onCheckout={handleCheckout} onRemove={(id) => setCart(prev => prev.filter(i => i.product.id !== id))} isDarkMode={isDarkMode} /></ProtectedRoute>} />
+          <Route path="/cart" element={<ProtectedRoute role={role}><CartPageView cart={cart} onCheckout={handleCheckout} onRemove={(id) => setCart(prev => prev.filter(i => i.product.id !== id))} isDarkMode={isDarkMode} selectedCurrency={selectedCurrency} exchangeRates={exchangeRates} /></ProtectedRoute>} />
           <Route path="/booking-status/:id" element={<ProtectedRoute role={role}><BookingStatusView bookings={bookings} products={products} isDarkMode={isDarkMode} /></ProtectedRoute>} />
           <Route path="/profile" element={<ProtectedRoute role={role}><UserProfileView user={userSession} bookings={bookings} isDarkMode={isDarkMode} /></ProtectedRoute>} />
+          <Route path="/settings" element={<ProtectedRoute role={role}><UserSettingsView user={userSession} isDarkMode={isDarkMode} onLogout={handleLogout} selectedCurrency={selectedCurrency} selectedCountry={selectedCountry} onCurrencyChange={setSelectedCurrency} onCountryChange={setSelectedCountry} /></ProtectedRoute>} />
+          <Route path="/notifications" element={<ProtectedRoute role={role}><NotificationsView userId={userSession?.id} isDarkMode={isDarkMode} /></ProtectedRoute>} />
 
           <Route path="/pages" element={<ProtectedRoute role={role}><PagesView role={role} isDarkMode={isDarkMode} /></ProtectedRoute>} />
 
@@ -283,7 +481,7 @@ export default function App() {
       
       <SupportChatModal isOpen={isSupportOpen} onClose={() => setIsSupportOpen(false)} messages={chatMessages} onSend={async t => {
         const id = `MSG-${Date.now()}`;
-        await supabaseOperation('set', 'chat_messages', {
+        await dbOperation('set', 'chat_messages', {
           id,
           customer_code_id: role === UserRole.ADMIN ? null : userSession?.id,
           sender_type: role === UserRole.ADMIN ? 'admin' : 'customer',
@@ -295,6 +493,7 @@ export default function App() {
       <BarcodeScannerModal isOpen={isScannerOpen} onClose={() => setIsScannerOpen(false)} onScan={handleVerify} />
     </div>
   );
+
 }
 
 // ----------------------------------------------------------------------
@@ -304,18 +503,18 @@ export default function App() {
 
 // --- 1. Admin Product Manager ---
 
-function AdminProductManager({ products, categories, onRefresh, isDarkMode }: any) {
+function AdminProductManager({ products, categories, onRefresh, isDarkMode, setProducts }: any) {
   const [isAdding, setIsAdding] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [form, setForm] = useState<any>({ 
-    name: '', 
-    description: '', 
-    price: 0, 
-    categoryId: '', 
-    images: [], 
-    isAvailable: true, 
-    stock: 1, 
-    specifications: { size: '', includesInstallation: true, accessories: [] } 
+  const [form, setForm] = useState<any>({
+    name: '',
+    description: '',
+    price: 0,
+    categoryId: '',
+    images: [],
+    isAvailable: true,
+    stock: 1,
+    specifications: { size: '', includesInstallation: true, accessories: [] }
   });
 
   const handleSave = async () => {
@@ -326,9 +525,12 @@ function AdminProductManager({ products, categories, onRefresh, isDarkMode }: an
       id,
       images: form.images.length ? form.images : ['https://images.unsplash.com/photo-1519741497674-611481863552?auto=format&fit=crop&q=80&w=800']
     };
-    await supabaseOperation('set', 'products', productData, id);
-    onRefresh(); 
-    setIsAdding(false); 
+    await dbOperation('set', 'products', productData, id);
+    alert('Saved Successfully!');
+    // Immediate UI update
+    setProducts(prev => editingId ? prev.map(p => p.id === id ? productData : p) : [...prev, productData]);
+    onRefresh();
+    setIsAdding(false);
     setEditingId(null);
     setForm({ name: '', description: '', price: 0, categoryId: '', images: [], isAvailable: true, stock: 1, specifications: { size: '', includesInstallation: true, accessories: [] } });
   };
@@ -341,7 +543,9 @@ function AdminProductManager({ products, categories, onRefresh, isDarkMode }: an
 
   const handleDelete = async (id: string) => {
     if (confirm('هل أنت متأكد من حذف هذه القطعة من المخزون؟')) {
-      await supabaseOperation('delete', 'products', null, id);
+      await dbOperation('delete', 'products', null, id);
+      // Immediate UI update
+      setProducts(prev => prev.filter(p => p.id !== id));
       onRefresh();
     }
   };
@@ -401,17 +605,30 @@ function AdminProductManager({ products, categories, onRefresh, isDarkMode }: an
                    </div>
 
                    <div className="space-y-2">
-                      <p className="text-[10px] font-black text-gray-400 pr-4 uppercase">رابط الصورة (URL)</p>
-                      <div className="flex gap-2">
-                         <input 
-                            className={`flex-1 p-6 rounded-[1.5rem] font-bold text-sm outline-none text-right shadow-inner ${isDarkMode ? 'bg-gray-800 border-gray-700 text-white' : 'bg-gray-50 border-transparent text-gray-900'}`} 
-                            placeholder="ضع رابط الصورة هنا..."
-                            value={form.images[0] || ''} 
-                            onChange={e => setForm({...form, images: [e.target.value]})}
+                      <p className="text-[10px] font-black text-gray-400 pr-4 uppercase">رفع الصورة</p>
+                      <div className="space-y-3">
+                         <input
+                            type="file"
+                            accept="image/*"
+                            onChange={async (e) => {
+                               const file = e.target.files?.[0];
+                               if (file) {
+                                  try {
+                                     const imageUrl = await uploadFile(file, 'products');
+                                     setForm({...form, images: [imageUrl]});
+                                  } catch (error) {
+                                     alert('فشل في رفع الصورة: ' + error.message);
+                                  }
+                               }
+                            }}
+                            className={`w-full p-4 rounded-[1.5rem] font-bold text-sm outline-none text-right shadow-inner file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-pink-50 file:text-pink-700 hover:file:bg-pink-100 ${isDarkMode ? 'bg-gray-800 border-gray-700 text-white file:bg-gray-700 file:text-gray-200' : 'bg-gray-50 border-transparent text-gray-900'}`}
                          />
-                         <div className={`p-6 rounded-[1.5rem] flex items-center justify-center ${isDarkMode ? 'bg-gray-800' : 'bg-gray-100'}`}>
-                            <ImageIcon size={20} className="text-gray-400"/>
-                         </div>
+                         {form.images[0] && (
+                            <div className="flex items-center gap-3 p-3 bg-green-50 rounded-xl">
+                               <CheckCircle size={20} className="text-green-600" />
+                               <span className="text-sm font-medium text-green-700">تم رفع الصورة بنجاح</span>
+                            </div>
+                         )}
                       </div>
                    </div>
 
@@ -471,40 +688,89 @@ function AdminProductManager({ products, categories, onRefresh, isDarkMode }: an
 
 // --- 2. Admin Category Manager ---
 
-function AdminCategoryManager({ categories, onRefresh, isDarkMode }: any) {
+function AdminCategoryManager({ categories, onRefresh, isDarkMode, setCategories }: any) {
   const [newCat, setNewCat] = useState('');
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editedName, setEditedName] = useState('');
+
   const handleAdd = async () => {
     if (!newCat.trim()) return;
     const id = `cat-${Date.now()}`;
-    await supabaseOperation('set', 'categories', { id, name: newCat, sections: [] }, id);
+    const categoryData = { id, name: newCat, sections: [] };
+    await dbOperation('set', 'categories', categoryData, id);
+    alert('Saved Successfully!');
+    // Immediate UI update
+    setCategories(prev => [...prev, categoryData]);
     setNewCat('');
     onRefresh();
   };
+
+  const handleEdit = (id: string, name: string) => {
+    setEditingId(id);
+    setEditedName(name);
+  };
+
+  const handleSaveEdit = async () => {
+    if (!editedName.trim()) return;
+    await dbOperation('update', 'categories', { name: editedName }, editingId);
+    alert('Saved Successfully!');
+    // Immediate UI update
+    setCategories(prev => prev.map(c => c.id === editingId ? { ...c, name: editedName } : c));
+    setEditingId(null);
+    setEditedName('');
+    onRefresh();
+  };
+
+  const handleCancelEdit = () => {
+    setEditingId(null);
+    setEditedName('');
+  };
+
   const handleDelete = async (id: string) => {
     if (confirm('هل أنت متأكد من حذف هذا القسم؟')) {
-      await supabaseOperation('delete', 'categories', null, id);
+      await dbOperation('delete', 'categories', null, id);
+      // Immediate UI update
+      setCategories(prev => prev.filter(c => c.id !== id));
       onRefresh();
     }
   };
+
   return (
     <div className={`p-6 space-y-8 text-right animate-fade ${isDarkMode ? 'bg-gray-950 text-white' : ''}`}>
        <h2 className="text-3xl font-black italic">إدارة الأقسام الملكية</h2>
        <div className="flex gap-4">
           <button onClick={handleAdd} className="bg-pink-600 text-white px-8 py-4 rounded-2xl font-black italic shadow-xl hover:bg-pink-700 transition-colors">إضافة قسم</button>
-          <input 
-            className={`flex-1 p-5 rounded-2xl text-right outline-none border-2 border-transparent focus:border-pink-500 transition-all shadow-inner font-bold text-sm ${isDarkMode ? 'bg-gray-900 border-gray-800 text-white' : 'bg-gray-50 border-transparent text-gray-900'}`} 
-            placeholder="اسم القسم الجديد (مثلاً: كوشات، صوتيات...)" 
-            value={newCat} 
-            onChange={e => setNewCat(e.target.value)} 
+          <input
+            className={`flex-1 p-5 rounded-2xl text-right outline-none border-2 border-transparent focus:border-pink-500 transition-all shadow-inner font-bold text-sm ${isDarkMode ? 'bg-gray-900 border-gray-800 text-white' : 'bg-gray-50 border-transparent text-gray-900'}`}
+            placeholder="اسم القسم الجديد (مثلاً: كوشات، صوتيات...)"
+            value={newCat}
+            onChange={e => setNewCat(e.target.value)}
           />
        </div>
        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {categories.map((c: any) => (
              <div key={c.id} className={`p-6 rounded-[2.5rem] border flex items-center justify-between shadow-sm transition-all hover:shadow-md ${isDarkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-100'}`}>
-               <button onClick={() => handleDelete(c.id)} className="text-red-500 p-3 hover:bg-red-50 rounded-xl transition-colors"><Trash2 size={20} /></button>
-               <div className="text-right">
-                  <span className="font-black italic text-lg">{c.name}</span>
-               </div>
+               {editingId === c.id ? (
+                 <div className="flex gap-2 flex-1">
+                   <input
+                     className={`flex-1 p-3 rounded-xl text-right outline-none border-2 border-transparent focus:border-pink-500 transition-all shadow-inner font-bold text-sm ${isDarkMode ? 'bg-gray-800 border-gray-700 text-white' : 'bg-gray-50 border-transparent text-gray-900'}`}
+                     value={editedName}
+                     onChange={e => setEditedName(e.target.value)}
+                   />
+                   <button onClick={handleSaveEdit} className="text-green-500 p-3 hover:bg-green-50 rounded-xl transition-colors"><CheckCircle size={20} /></button>
+                   <button onClick={handleCancelEdit} className="text-red-500 p-3 hover:bg-red-50 rounded-xl transition-colors"><X size={20} /></button>
+                 </div>
+               ) : (
+                 <>
+                   <div className="flex gap-3">
+                     <button onClick={() => handleEdit(c.id, c.name)} className="text-blue-500 p-3 hover:bg-blue-50 rounded-xl transition-colors"><Edit2 size={20} /></button>
+                     <button onClick={() => handleDelete(c.id)} className="text-red-500 p-3 hover:bg-red-50 rounded-xl transition-colors"><Trash2 size={20} /></button>
+                   </div>
+                   <div className="text-right">
+                      <span className="font-black italic text-lg">{c.name}</span>
+                   </div>
+                 </>
+               )}
              </div>
           ))}
        </div>
@@ -520,12 +786,12 @@ function AdminCategoryManager({ categories, onRefresh, isDarkMode }: any) {
 
 // --- 3. Admin Routes & Components ---
 
-function AdminRoutes({ products, categories, bookings, codes, content, onRefresh, isDarkMode }: any) {
+function AdminRoutes({ products, categories, bookings, codes, content, onRefresh, isDarkMode, setProducts, setCategories }: any) {
   return (
     <Routes>
       <Route index element={<AdminDashboardView bookings={bookings} codes={codes} products={products} isDarkMode={isDarkMode} />} />
-      <Route path="products" element={<AdminProductManager products={products} categories={categories} onRefresh={onRefresh} isDarkMode={isDarkMode} />} />
-      <Route path="categories" element={<AdminCategoryManager categories={categories} onRefresh={onRefresh} isDarkMode={isDarkMode} />} />
+      <Route path="products" element={<AdminProductManager products={products} categories={categories} onRefresh={onRefresh} isDarkMode={isDarkMode} setProducts={setProducts} />} />
+      <Route path="categories" element={<AdminCategoryManager categories={categories} onRefresh={onRefresh} isDarkMode={isDarkMode} setCategories={setCategories} />} />
       <Route path="bookings" element={<AdminBookingManager bookings={bookings} onRefresh={onRefresh} isDarkMode={isDarkMode} />} />
       <Route path="codes" element={<AdminCodesManager codes={codes} onRefresh={onRefresh} isDarkMode={isDarkMode} />} />
       <Route path="card-generator" element={<AdminCardGenerator onRefresh={onRefresh} isDarkMode={isDarkMode} />} />
@@ -544,26 +810,37 @@ function AdminCardGenerator({ onRefresh, isDarkMode }: any) {
   const [userPhone, setUserPhone] = useState('');
   const cardRef = useRef<HTMLDivElement>(null);
 
+  const generateComplexCode = (length = 8) => {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*';
+    let result = '';
+    for (let i = 0; i < length; i++) {
+      result += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return result;
+  };
+
   const handleGenerate = async () => {
     if (!customerName.trim()) {
       alert('يرجى إدخال اسم العميل');
       return;
     }
-    const newCode = `NICE-${Math.floor(1000 + Math.random() * 8999)}`;
+    const newCode = generateComplexCode();
     try {
       const qr = await toDataURL(newCode, { margin: 1, width: 400 });
       setGeneratedCode(newCode);
       setQrDataUrl(qr);
 
-      // استخدام خدمة الأكواد التي تدعم التخزين المحلي
-      await CustomerCodeService.createCustomerCode({
+      // استخدام Firebase لإنشاء الكود
+      await dbOperation('set', 'customer_codes', {
+        id: `CODE-${Date.now()}`,
         code: newCode,
         customer_name: customerName,
         user_phone: userPhone,
         is_active: true,
         status: 'approved',
-        wallet_balance: 0
-      });
+        wallet_balance: 0,
+        created_at: new Date().toISOString()
+      }, `CODE-${Date.now()}`);
 
       onRefresh();
       alert('تم توليد الكود وحفظه بنجاح');
@@ -620,6 +897,35 @@ function AdminBookingManager({ bookings, onRefresh, isDarkMode }: any) {
   const [filter, setFilter] = useState('All');
   const [searchTerm, setSearchTerm] = useState('');
 
+  // Function to generate WhatsApp invoice message
+  const generateInvoiceMessage = (booking: any) => {
+    const customerName = booking.user_name || 'غير محدد';
+    const eventDate = booking.event_date ? new Date(booking.event_date).toLocaleDateString('ar-SA') : 'لم يحدد';
+    const totalPrice = formatCurrency(booking.total_price || 0);
+    const currency = 'ر.س'; // Assuming SAR as default
+
+    const message = `تفاصيل الحجز الجديد:
+
+العميل: ${customerName}
+التاريخ: ${eventDate}
+الإجمالي: ${totalPrice} ${currency}
+
+رقم الحجز: ${booking.id}
+تاريخ الطلب: ${formatDate(booking.createdAt)}
+
+فرحتي لتنسيق المناسبات`;
+
+    return encodeURIComponent(message);
+  };
+
+  // Function to send invoice to WhatsApp
+  const sendInvoiceToWhatsApp = (booking: any) => {
+    const message = generateInvoiceMessage(booking);
+    const phoneNumber = booking.user_phone ? booking.user_phone.replace(/^\+/, '') : '967735263137'; // Use booking phone or fallback
+    const whatsappUrl = `https://wa.me/${phoneNumber}?text=${message}`;
+    window.open(whatsappUrl, '_blank');
+  };
+
   const filteredBookings = bookings.filter((b: any) => {
     if (!b) return false;
     const statusMatch = filter === 'All' || b.status === filter;
@@ -629,13 +935,13 @@ function AdminBookingManager({ bookings, onRefresh, isDarkMode }: any) {
   });
 
   const updateStatus = async (id: string, status: string) => {
-    await supabaseOperation('update', 'bookings', { status }, id);
+    await dbOperation('update', 'bookings', { status }, id);
     onRefresh();
   };
 
   const handleDelete = async (id: string) => {
     if (confirm('هل أنت متأكد من حذف هذا الحجز؟')) {
-      await supabaseOperation('delete', 'bookings', null, id);
+      await dbOperation('delete', 'bookings', null, id);
       onRefresh();
     }
   };
@@ -766,28 +1072,64 @@ function AdminCodesManager({ codes, onRefresh, isDarkMode }: any) {
     return statusMatch && searchMatch;
   });
 
-  const updateStatus = async (id: string, status: string, code: string, isLocal?: boolean) => {
-    if (isLocal) {
-      // تحديث الكود المحلي
-      const localCodes = JSON.parse(localStorage.getItem('local_customer_codes') || '[]');
-      const updatedCodes = localCodes.map((c: any) => {
-        if (c.id === id) {
-          return {
-            ...c,
-            status,
-            is_active: status === 'approved',
-            code: status === 'approved' ? code : 'PENDING'
-          };
-        }
-        return c;
-      });
-      localStorage.setItem('local_customer_codes', JSON.stringify(updatedCodes));
-    } else {
-      // تحديث في قاعدة البيانات
-      const isActive = status === 'approved';
-      await supabaseOperation('update', 'customer_codes', { status, isActive, code: isActive ? code : 'PENDING' }, id);
+  const generateNewCode = (currentCode: string) => {
+    const generateComplexCode = (length = 8) => {
+      const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*';
+      let result = '';
+      for (let i = 0; i < length; i++) {
+        result += chars.charAt(Math.floor(Math.random() * chars.length));
+      }
+      return result;
+    };
+
+    if (currentCode && typeof currentCode === 'string' && currentCode.startsWith('PENDING')) {
+      return generateComplexCode();
     }
-    onRefresh();
+    return currentCode || generateComplexCode();
+  };
+
+  const updateStatus = async (id: string, status: string, code: string, isLocal?: boolean, customerName?: string, userPhone?: string) => {
+    try {
+      if (isLocal) {
+        // تحديث الكود المحلي
+        const localCodes = JSON.parse(localStorage.getItem('local_customer_codes') || '[]');
+        const updatedCodes = localCodes.map((c: any) => {
+          if (c.id === id) {
+            return {
+              ...c,
+              status,
+              is_active: status === 'approved',
+              code: status === 'approved' ? code : 'PENDING'
+            };
+          }
+          return c;
+        });
+        localStorage.setItem('local_customer_codes', JSON.stringify(updatedCodes));
+      } else {
+        // تحديث في قاعدة البيانات
+        const isActive = status === 'approved';
+        const result = await dbOperation('update', 'customer_codes', { status, is_active: isActive, code: isActive ? code : 'PENDING' }, id);
+        if (status === 'approved') {
+          // إرسال إشعار عبر WhatsApp للمستخدم عند التفعيل
+          try {
+            const message = `مرحبا ${customerName}!\n\nتم تفعيل كودك بنجاح!\n\nكود الدخول: ${code}\n\nيمكنك الآن الدخول إلى تطبيق Nice Events واستخدام الكود للتسوق والحجز.\n\nفرحتي لتنسيق المناسبات`;
+            // إزالة رمز + من رقم الهاتف لـ WhatsApp
+            const cleanPhone = userPhone.replace(/^\+/, '');
+            // استخدام WhatsApp API بدلاً من wa.me لتحسين التفاعل بين الأجهزة المختلفة
+            window.open(`https://api.whatsapp.com/send?phone=${cleanPhone}&text=${encodeURIComponent(message)}`, '_blank');
+          } catch (e) { console.log('WhatsApp error:', e); }
+
+          // إرسال إشعار داخل التطبيق أيضاً
+          try {
+            await NotificationService.notifyCodeApproval(id, code);
+          } catch (e) { console.log('Notification error:', e); }
+        }
+      }
+      onRefresh();
+    } catch (error: any) {
+      console.error('Error in updateStatus:', error);
+      alert('فشل في تحديث الحالة: ' + error.message);
+    }
   };
 
   const handleDelete = async (id: string, isLocal?: boolean) => {
@@ -799,17 +1141,10 @@ function AdminCodesManager({ codes, onRefresh, isDarkMode }: any) {
         localStorage.setItem('local_customer_codes', JSON.stringify(filteredCodes));
       } else {
         // حذف من قاعدة البيانات
-        await supabaseOperation('delete', 'customer_codes', null, id);
+        await dbOperation('delete', 'customer_codes', null, id);
       }
       onRefresh();
     }
-  };
-
-  const generateNewCode = (currentCode: string) => {
-    if (currentCode && typeof currentCode === 'string' && currentCode.startsWith('PENDING')) {
-      return `NICE-${Math.floor(1000 + Math.random() * 8999)}`;
-    }
-    return currentCode || `NICE-${Math.floor(1000 + Math.random() * 8999)}`;
   };
 
   return (
@@ -873,13 +1208,13 @@ function AdminCodesManager({ codes, onRefresh, isDarkMode }: any) {
                 </div>
                 <div className="flex gap-3">
                   {c.status === 'pending' && (
-                    <button onClick={() => updateStatus(c.id, 'approved', generateNewCode(c.code), c.isLocal)} className="bg-green-500 text-white px-4 py-2 rounded-xl font-bold text-sm transition-colors hover:bg-green-600 flex items-center gap-2"><CheckCircle size={16} /> تفعيل</button>
+                    <button onClick={() => updateStatus(c.id, 'approved', generateNewCode(c.code), c.isLocal, c.customerName, c.userPhone)} className="bg-green-500 text-white px-4 py-2 rounded-xl font-bold text-sm transition-colors hover:bg-green-600 flex items-center gap-2"><CheckCircle size={16} /> تفعيل</button>
                   )}
                   {c.status === 'approved' && (
-                    <button onClick={() => updateStatus(c.id, 'blocked', 'BLOCKED', c.isLocal)} className="bg-red-500/10 text-red-500 px-4 py-2 rounded-xl font-bold text-sm transition-colors hover:bg-red-500 hover:text-white flex items-center gap-2"><X size={16} /> حظر</button>
+                    <button onClick={() => updateStatus(c.id, 'blocked', 'BLOCKED', c.isLocal, c.customerName, c.userPhone)} className="bg-red-500/10 text-red-500 px-4 py-2 rounded-xl font-bold text-sm transition-colors hover:bg-red-500 hover:text-white flex items-center gap-2"><X size={16} /> حظر</button>
                   )}
                   {c.status === 'blocked' && (
-                    <button onClick={() => updateStatus(c.id, 'approved', generateNewCode(c.code), c.isLocal)} className="bg-blue-500 text-white px-4 py-2 rounded-xl font-bold text-sm transition-colors hover:bg-blue-600 flex items-center gap-2"><UserCheck size={16} /> إعادة تفعيل</button>
+                    <button onClick={() => updateStatus(c.id, 'approved', generateNewCode(c.code), c.isLocal, c.customerName, c.userPhone)} className="bg-blue-500 text-white px-4 py-2 rounded-xl font-bold text-sm transition-colors hover:bg-blue-600 flex items-center gap-2"><UserCheck size={16} /> إعادة تفعيل</button>
                   )}
                 </div>
               </div>
@@ -932,17 +1267,29 @@ function AdminDashboardView({ bookings, codes, products, isDarkMode }: any) {
 
             {/* أحدث الحجوزات */}
             <div className={`p-8 rounded-[3rem] border shadow-xl ${isDarkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-100'}`}>
-                <h3 className="text-xl font-black italic text-pink-600 mb-6">أحدث 5 حجوزات</h3>
-                <div className="space-y-4">
-                    {bookings.slice(0, 5).map((b: any) => (
-                        <div key={b.id} className="flex justify-between items-center border-b pb-3">
-                            <StatusBadge status={b.status} />
-                            <div className="text-right">
-                                <p className={`font-bold ${isDarkMode ? 'text-gray-100' : 'text-gray-800'}`}>{b.user_name}</p>
-                                <p className={`text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>{b.id}</p>
-                            </div>
-                        </div>
+                <h3 className="text-xl font-black italic text-pink-600 mb-6 flex items-center gap-2"><BarChart3 size={24}/> الأرباح الشهرية المكتملة</h3>
+                
+                <div className="h-64 flex items-end gap-2 pr-6">
+                    <div className={`w-8 h-full rounded-md flex flex-col justify-end items-center font-bold text-xs ${isDarkMode ? 'bg-gray-800 text-gray-400' : 'bg-gray-100 text-gray-600'}`}>
+                        <p className="rotate-90 whitespace-nowrap mb-16 opacity-50">الإيرادات (ر.س)</p>
+                    </div>
+                    {/* رسم بياني الإيرادات معطل مؤقتاً لعدم تعريف chartData/maxRevenue */}
+                    {/*
+                    {chartData.map(([month, revenue], index) => (
+                      <div key={index} className="flex flex-col items-center flex-1 h-full justify-end">
+                        <div 
+                          className={`w-full rounded-t-lg transition-all duration-700 ${revenue > 0 ? 'bg-pink-600' : 'bg-gray-500'}`}
+                          style={{ height: `${(revenue / maxRevenue) * 90 + 10}%` }}
+                        ></div>
+                        <span className={`text-xs mt-2 font-bold ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>{month.split(' ')[0]}</span>
+                      </div>
                     ))}
+                    */}
+                </div>
+
+                <div className="mt-10 pt-6 border-t">
+                    {/* <DetailRow label="إجمالي الأرباح المكتملة" value={formatCurrency(completedBookings.reduce((sum: number, b: any) => sum + b.totalPrice, 0))} isDarkMode={isDarkMode} valueColor="text-green-500" />
+                    <DetailRow label="إجمالي عدد الحجوزات المكتملة" value={completedBookings.length} isDarkMode={isDarkMode} /> */}
                 </div>
             </div>
         </div>
@@ -953,6 +1300,7 @@ function AdminDashboardView({ bookings, codes, products, isDarkMode }: any) {
 
 function AdminSettingsView({ content, onRefresh, isDarkMode }: any) {
   const [form, setForm] = useState(content);
+  const [exchangeRates, setExchangeRates] = useState({ sar_to_yer: 140, sar_to_usd: 0.27 });
 
   useEffect(() => {
     setForm(content);
@@ -961,12 +1309,26 @@ function AdminSettingsView({ content, onRefresh, isDarkMode }: any) {
   const handleSave = async () => {
     if (confirm('هل أنت متأكد من حفظ الإعدادات؟ سيؤثر هذا على إعدادات التطبيق العامة.')) {
       // ✅ تم التأكد من استخدام 'app_settings' هنا
-      const res = await supabaseOperation('set', 'app_settings', { ...form, id: 'main' }, 'main');
+      const res = await dbOperation('set', 'app_settings', { ...form, id: 'main' }, 'main');
       if ((res as any).success) {
         onRefresh();
         alert('تم حفظ الإعدادات بنجاح');
       } else {
         alert('فشل الحفظ: ' + (res as any).error);
+      }
+    }
+  };
+
+  const handleUpdateExchangeRates = async () => {
+    if (confirm('هل أنت متأكد من تحديث أسعار الصرف؟ سيؤثر هذا على جميع العملات في التطبيق.')) {
+      try {
+        await dbOperation('set', 'app_settings', {
+          exchange_rates: exchangeRates,
+          updated_at: new Date().toISOString()
+        }, 'main');
+        alert('تم تحديث أسعار الصرف بنجاح');
+      } catch (error) {
+        alert('فشل في تحديث أسعار الصرف: ' + error);
       }
     }
   };
@@ -1001,9 +1363,33 @@ function AdminSettingsView({ content, onRefresh, isDarkMode }: any) {
           info="يجب أن يبدأ بـ https://wa.me/"
         />
 
+        <SectionInput
+          label="سعر صرف الريال السعودي إلى الريال اليمني"
+          value={exchangeRates.sar_to_yer}
+          onChange={(v: any) => setExchangeRates({ ...exchangeRates, sar_to_yer: Number(v) })}
+          isDarkMode={isDarkMode}
+          type="number"
+          info="السعر الحالي: 1 ر.س = X ر.ي"
+        />
+
+        <SectionInput
+          label="سعر صرف الريال السعودي إلى الدولار الأمريكي"
+          value={exchangeRates.sar_to_usd}
+          onChange={(v: any) => setExchangeRates({ ...exchangeRates, sar_to_usd: Number(v) })}
+          isDarkMode={isDarkMode}
+          type="number"
+          info="السعر الحالي: 1 ر.س = X $"
+        />
+
         <div className="flex justify-center pt-8">
           <button onClick={handleSave} className="w-96 py-6 bg-pink-600 text-white rounded-[2rem] font-black italic shadow-xl hover:bg-pink-700 transition-all flex items-center justify-center gap-2">
             <Save size={20}/> حفظ التعديلات
+          </button>
+        </div>
+
+        <div className="flex justify-center pt-4">
+          <button onClick={handleUpdateExchangeRates} className="w-96 py-6 bg-amber-600 text-white rounded-[2rem] font-black italic shadow-xl hover:bg-amber-700 transition-all flex items-center justify-center gap-2">
+            <DollarSign size={20}/> تحديث أسعار الصرف
           </button>
         </div>
       </div>
@@ -1045,13 +1431,13 @@ function StoreHomeView({ products, categories, onAdd, isDarkMode }: any) {
         <div className="flex overflow-x-auto pb-2 scrollbar-hide">
           {uniqueCategories.map(cat => (
             <button
-              key={cat}
-              onClick={() => setActiveCategory(cat)}
+              key={String(cat)}
+              onClick={() => setActiveCategory(String(cat))}
               className={`flex-shrink-0 px-5 py-2 mx-1 rounded-full font-bold text-sm transition-colors ${
                 activeCategory === cat ? 'bg-black text-white' : isDarkMode ? 'bg-gray-700 text-gray-300 hover:bg-gray-600' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
               }`}
             >
-              {cat}
+              {String(cat)}
             </button>
           ))}
         </div>
@@ -1076,8 +1462,19 @@ function StoreHomeView({ products, categories, onAdd, isDarkMode }: any) {
 
 // --- 10. Cart Page View ---
 
-function CartPageView({ cart, onCheckout, onRemove, isDarkMode }: any) {
-  const total = cart.reduce((sum: number, item: any) => sum + item.product.price * item.quantity, 0);
+function CartPageView({ cart, onCheckout, onRemove, isDarkMode, selectedCurrency, exchangeRates }: any) {
+  // Calculate total in SAR first
+  const totalSAR = cart.reduce((sum: number, item: any) => sum + item.product.price * item.quantity, 0);
+
+  // Convert to selected currency
+  const convertToSelectedCurrency = (amount: number) => {
+    if (selectedCurrency === 'SAR') return amount;
+    if (selectedCurrency === 'YER') return amount * (exchangeRates?.sar_to_yer || 140);
+    if (selectedCurrency === 'USD') return amount * (exchangeRates?.sar_to_usd || 0.27);
+    return amount;
+  };
+
+  const total = convertToSelectedCurrency(totalSAR);
 
   return (
     <div className={`p-6 space-y-8 text-right pb-32 ${isDarkMode ? 'bg-gray-950 text-white' : ''} animate-fade`}>
@@ -1103,7 +1500,7 @@ function CartPageView({ cart, onCheckout, onRemove, isDarkMode }: any) {
                   <p className={`text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>الكمية: {item.quantity}</p>
                 </div>
 
-                <span className="text-lg font-black italic text-pink-600">{formatCurrency(item.product.price * item.quantity)}</span>
+                <span className="text-lg font-black italic text-pink-600">{formatCurrency(convertToSelectedCurrency(item.product.price * item.quantity), selectedCurrency)}</span>
               </div>
             ))}
           </div>
@@ -1165,9 +1562,9 @@ function BookingStatusView({ bookings, products, isDarkMode }: any) {
           <DetailRow label="الموقع المتوقع" value={booking.location} isDarkMode={isDarkMode} />
           
           <div className="pt-4 border-t">
-             <DetailRow label="إجمالي قيمة الإيجار" value={formatCurrency(booking.totalPrice)} valueColor="text-pink-600" isDarkMode={isDarkMode} />
-             <DetailRow label="مبلغ التأمين المدفوع" value={formatCurrency(booking.depositAmount)} valueColor="text-amber-600" isDarkMode={isDarkMode} />
-             <DetailRow label="الإجمالي المتبقي" value={formatCurrency(booking.totalPrice - booking.depositAmount)} valueColor="text-black dark:text-white" isDarkMode={isDarkMode} />
+             <DetailRow label="إجمالي قيمة الإيجار" value={formatCurrency(booking.totalPrice)} isDarkMode={isDarkMode} valueColor="text-pink-600" />
+             <DetailRow label="مبلغ التأمين المدفوع" value={formatCurrency(booking.depositAmount)} isDarkMode={isDarkMode} valueColor="text-amber-600" />
+             <DetailRow label="الإجمالي المتبقي" value={formatCurrency(booking.totalPrice - booking.depositAmount)} isDarkMode={isDarkMode} valueColor="text-black dark:text-white" />
           </div>
         </div>
 
@@ -1186,10 +1583,22 @@ function BookingStatusView({ bookings, products, isDarkMode }: any) {
           </ul>
         </div>
         
-        <div className="mt-8 flex justify-center no-print">
-            <button onClick={() => window.print()} className="bg-black text-white px-8 py-4 rounded-[2rem] font-black italic shadow-xl hover:bg-pink-600 transition-all flex items-center gap-2">
-                <Printer size={20}/> طباعة كشف الحجز
-            </button>
+        <div className="mt-8 flex flex-col md:flex-row justify-center gap-4 no-print">
+          <button onClick={() => window.print()} className="bg-black text-white px-8 py-4 rounded-[2rem] font-black italic shadow-xl hover:bg-pink-600 transition-all flex items-center gap-2">
+            <Printer size={20}/> طباعة كشف الحجز
+          </button>
+          <button onClick={async () => {
+            const { jsPDF } = await import('jspdf');
+            const doc = new jsPDF();
+            doc.setFont('Arial');
+            doc.text('كشف الحجز', 10, 10);
+            bookings.forEach((b: any, i: number) => {
+              doc.text(`- ${b.id} | ${b.status} | ${b.start_date?.slice(0,10) || ''}`, 12, 20 + i * 10);
+            });
+            doc.save('Booking-Status.pdf');
+          }} className="bg-pink-100 text-pink-700 px-8 py-4 rounded-[2rem] font-black italic shadow-xl hover:bg-pink-200 transition-all flex items-center gap-2">
+            <Printer size={20}/> تصدير PDF
+          </button>
         </div>
       </div>
     </div>
@@ -1450,7 +1859,7 @@ function BarcodeScannerModal({ isOpen, onClose, onScan }: any) {
             <div className="flex gap-3">
               <button
                 onClick={handleManualScan}
-                className="flex-1 py-4 bg-gray-100 text-gray-700 rounded-[1.5rem] font-bold transition-colors hover:bg-gray-200"
+                className="flex-1 py-4 bg-gray-100 text-gray-700 rounded-[1.5rem] font-bold transition-colors flex items-center justify-center gap-2"
               >
                 تأكيد الإدخال اليدوي
               </button>
@@ -1485,7 +1894,11 @@ function AccessGateView({ onVerify, onScan, onRequest, isDarkMode }: any) {
       alert('الرجاء إدخال الاسم ورقم الهاتف لطلب الكود.');
       return;
     }
-    onRequest(name, phone);
+
+    // Default to Saudi Arabia format for phone number
+    const fullPhone = `+966${phone}`;
+
+    onRequest(name, fullPhone);
   };
 
   return (
@@ -1502,6 +1915,8 @@ function AccessGateView({ onVerify, onScan, onRequest, isDarkMode }: any) {
             <button onClick={() => setMode('login')} className={`font-black italic pb-2 transition-colors ${mode === 'login' ? 'text-pink-600 border-b-2 border-pink-600' : 'text-gray-500'}`}>الدخول بالكود</button>
             <button onClick={() => setMode('request')} className={`font-black italic pb-2 transition-colors ${mode === 'request' ? 'text-pink-600 border-b-2 border-pink-600' : 'text-gray-500'}`}>طلب كود جديد</button>
         </div>
+
+
 
         {mode === 'login' ? (
           <div className="space-y-6">
@@ -1755,7 +2170,7 @@ function StatusBadge({ status, type = 'booking' }: { status: string, type?: 'boo
             text = 'غير معروف';
     }
     return (
-        <span className={`px-4 py-1 rounded-full font-bold text-xs ${color} flex items-center gap-1`}>
+        <span className={`px-4 py-1 rounded-full font-bold text-xs ${color} flex items-center gap-1 shadow-md`}>
             {text}
         </span>
     );
@@ -1805,7 +2220,7 @@ function AdminDrawer({ isOpen, onClose, onLogout, isDarkMode }: any) {
     return (
         <div className="fixed inset-0 z-[300] flex justify-end">
             <div className="fixed inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose}></div>
-            <div className={`w-80 h-full p-6 shadow-2xl z-[400] transition-transform duration-300 transform translate-x-0 ${isDarkMode ? 'bg-gray-900 border-l border-gray-800 text-white' : 'bg-white text-gray-900'}`}>
+            <div className={`w-80 h-full p-6 shadow-2xl z-[400] transition-transform duration-300 transform translate-x-0 ${isDarkMode ? 'bg-gray-900 border-l border-gray-800' : 'bg-white text-gray-900'}`}>
                 
                 <div className="flex justify-between items-center pb-6 border-b">
                     <button onClick={onClose} className="p-2 hover:text-red-500"><X size={24}/></button>
@@ -1837,13 +2252,14 @@ function AdminDrawer({ isOpen, onClose, onLogout, isDarkMode }: any) {
 }
 
 function UserBottomNav({ cartCount, onLogout }: any) {
-    const location = useLocation();
+  const location = useLocation();
 
     const navItems = [
-        { icon: Home, label: 'المتجر', path: '/store' },
-        { icon: Calendar, label: 'حجوزاتي', path: '/bookings' },
-        { icon: ShoppingCart, label: 'السلة', path: '/cart', count: cartCount },
-        { icon: User, label: 'حسابي', path: '/profile' },
+      { icon: Home, label: 'المتجر', path: '/store' },
+      { icon: Calendar, label: 'حجوزاتي', path: '/bookings' },
+      { icon: ShoppingCart, label: 'السلة', path: '/cart', count: cartCount },
+      { icon: User, label: 'حسابي', path: '/profile' },
+      { icon: Settings, label: 'الإعدادات', path: '/settings' },
     ];
 
     return (
@@ -1917,10 +2333,45 @@ function UserProfileView({ user, bookings, chatMessages, onSendMessage, isDarkMo
     .filter((b: any) => b.status === 'Completed')
     .reduce((sum: number, b: any) => sum + b.totalPrice, 0);
 
+  // --- Export/Backup Logic ---
+  const handleExportJSON = () => {
+    const data = {
+      user,
+      bookings: userBookings,
+    };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `NiceEvents-Backup-${user?.customer_name || 'user'}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleExportPDF = async () => {
+    const { jsPDF } = await import('jspdf');
+    const doc = new jsPDF();
+    doc.setFont('Arial');
+    doc.text(`بيانات المستخدم: ${user?.customer_name || ''}`, 10, 10);
+    doc.text(`رقم الهاتف: ${user?.user_phone || ''}`, 10, 20);
+    doc.text(`الكود: ${user?.code || ''}`, 10, 30);
+    doc.text('الحجوزات:', 10, 40);
+    userBookings.forEach((b: any, i: number) => {
+      doc.text(`- ${b.id} | ${b.status} | ${b.start_date?.slice(0,10) || ''}`, 12, 50 + i * 10);
+    });
+    doc.save(`NiceEvents-Backup-${user?.customer_name || 'user'}.pdf`);
+  };
+
   return (
     <>
       <div className={`p-6 space-y-8 text-right animate-fade pb-32 ${isDarkMode ? 'bg-gray-950 text-white' : ''}`}>
         <h2 className="text-3xl font-black italic">حسابي الشخصي</h2>
+
+        {/* Export/Backup Buttons */}
+        <div className="flex gap-4 mb-4 no-print">
+          <button onClick={handleExportJSON} className="bg-amber-100 text-amber-700 px-4 py-2 rounded-xl font-bold flex items-center gap-2 hover:bg-amber-200 transition-all"><Download size={18}/> نسخ احتياطي (JSON)</button>
+          <button onClick={handleExportPDF} className="bg-pink-100 text-pink-700 px-4 py-2 rounded-xl font-bold flex items-center gap-2 hover:bg-pink-200 transition-all"><Printer size={18}/> تصدير PDF</button>
+        </div>
 
         {/* User Info Card */}
         <div className={`p-8 rounded-[3rem] shadow-xl ${isDarkMode ? 'bg-gray-900 border border-gray-800' : 'bg-white border border-gray-100'}`}>
@@ -1971,14 +2422,93 @@ function UserProfileView({ user, bookings, chatMessages, onSendMessage, isDarkMo
   );
 }
 
+// --- Notifications View (عرض الإشعارات) ---
+
+function NotificationsView({ userId, isDarkMode }: any) {
+  const [notifications, setNotifications] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const fetchNotifications = async () => {
+      if (!userId) return;
+      try {
+        // Assuming notifications are stored in a table, fetch them
+        const res = await dbOperation('get', 'notifications', { user_id: userId });
+        if ((res as any).success) {
+          setNotifications((res as any).data || []);
+        }
+      } catch (error) {
+        console.error('Error fetching notifications:', error);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchNotifications();
+  }, [userId]);
+
+  const markAsRead = async (id: string) => {
+    try {
+      await dbOperation('update', 'notifications', { is_read: true }, id);
+      setNotifications(prev => prev.map(n => n.id === id ? { ...n, is_read: true } : n));
+    } catch (error) {
+      console.error('Error marking notification as read:', error);
+    }
+  };
+
+  if (loading) return <LoadingScreen message="جاري تحميل الإشعارات..." />;
+
+  return (
+    <div className={`p-6 space-y-8 text-right animate-fade pb-24 ${isDarkMode ? 'bg-gray-950 text-white' : ''}`}>
+      <h2 className="text-3xl font-black italic">الإشعارات</h2>
+
+      <div className="space-y-4">
+        {notifications.length > 0 ? (
+          notifications.map((notification: any) => (
+            <div key={notification.id} className={`p-6 rounded-[2.5rem] border shadow-md transition-all ${isDarkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-100'} ${!notification.is_read ? 'border-l-4 border-l-pink-600' : ''}`}>
+              <div className="flex justify-between items-start border-b pb-4 mb-4">
+                <div className="flex gap-3">
+                  {!notification.is_read && (
+                    <button onClick={() => markAsRead(notification.id)} className="text-pink-600 p-2 hover:bg-pink-50 rounded-xl transition-colors">
+                      <CheckCircle size={20} />
+                    </button>
+                  )}
+                </div>
+                <div className="text-right flex-1">
+                  <h3 className={`text-xl font-black italic ${isDarkMode ? 'text-gray-100' : 'text-gray-800'}`}>{notification.title}</h3>
+                  <p className={`text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>{formatDate(notification.created_at)}</p>
+                </div>
+              </div>
+
+              <p className={`text-sm font-medium ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>{notification.message}</p>
+
+              {notification.data && notification.data.code && (
+                <div className="mt-4 p-3 bg-pink-50 rounded-xl">
+                  <p className="text-sm font-bold text-pink-600">كود الدخول: {notification.data.code}</p>
+                </div>
+              )}
+            </div>
+          ))
+        ) : (
+          <div className="text-center py-20 opacity-30 flex flex-col items-center">
+            <Bell size={80} className="mb-4" />
+            <p className="text-xl font-black italic">لا توجد إشعارات</p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // --- Pages View (عرض جميع الصفحات حسب الصلاحيات) ---
 
-function PagesView({ role, isDarkMode }: any) {
+function PagesView({ role, isDarkMode }: any): React.JSX.Element {
   const [pages, setPages] = useState([
     { name: 'المتجر', path: '/store', description: 'تصفح وتسوق قطع الأثاث والديكور', role: 'user' },
     { name: 'حجوزاتي', path: '/bookings', description: 'عرض جميع حجوزاتك السابقة', role: 'user' },
     { name: 'السلة', path: '/cart', description: 'عرض وإدارة سلة التسوق', role: 'user' },
     { name: 'حسابي', path: '/profile', description: 'إدارة حسابك الشخصي', role: 'user' },
+    { name: 'الإشعارات', path: '/notifications', description: 'عرض جميع الإشعارات', role: 'user' },
     { name: 'لوحة التحكم', path: '/admin', description: 'لوحة تحكم الإدارة الرئيسية', role: 'admin' },
     { name: 'إدارة المخزون', path: '/admin/products', description: 'إضافة وتعديل قطع المخزون', role: 'admin' },
     { name: 'إدارة الأقسام', path: '/admin/categories', description: 'إدارة أقسام المنتجات', role: 'admin' },
@@ -2062,10 +2592,9 @@ function PagesView({ role, isDarkMode }: any) {
       {filteredPages.length === 0 && (
         <div className="text-center py-20 opacity-30 flex flex-col items-center">
           <Layers size={80} className="mb-4" />
-          <p className="text-xl font-black italic">لا توجد صفحات متاحة</p>
+          <p className="font-black italic">لا توجد صفحات متاحة</p>
         </div>
       )}
     </div>
   );
 }
-// End of the complete 1177 line code structure (تم تضمين جميع الدوال)

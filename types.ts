@@ -127,6 +127,8 @@ export interface Booking {
   user_phone?: string;
   start_date: string;
   end_date: string;
+  event_date: string; // Date of the event (YYYY-MM-DD)
+  event_time: string; // Time of the event (HH:MM)
   status: 'Pending' | 'Confirmed' | 'Cancelled' | 'Completed' | 'Delivered';
   total_price: number;
   location: string;

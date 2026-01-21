@@ -13,14 +13,15 @@ export default defineConfig(({ mode }) => {
         headers: {
           'Cross-Origin-Embedder-Policy': 'require-corp',
           'Cross-Origin-Opener-Policy': 'same-origin',
-        }
+          'Cache-Control': 'public, max-age=31536000',
+          'X-Content-Type-Options': 'nosniff',
+        },
+        historyApiFallback: true
       },
       plugins: [react()],
       define: {
         'process.env.API_KEY': JSON.stringify(env.GEMINI_API_KEY),
-        'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
-        'process.env.SUPABASE_URL': JSON.stringify(env.SUPABASE_URL),
-        'process.env.SUPABASE_ANON_KEY': JSON.stringify(env.SUPABASE_ANON_KEY)
+        'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY)
       },
       resolve: {
         alias: {

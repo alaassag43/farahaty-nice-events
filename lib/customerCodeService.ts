@@ -1,4 +1,4 @@
-import { supabase } from './supabase';
+import { dbOperation } from './firebase';
 
 interface CustomerCodeData {
   id: string;
@@ -18,11 +18,7 @@ export class CustomerCodeService {
 
     try {
       for (const code of localCodes) {
-        const { error } = await supabase
-          .from('customer_codes')
-          .upsert([code], { onConflict: 'id' });
-
-        if (error) throw error;
+        await dbOperation('set', 'customer_codes', code, code.id);
       }
 
       // مسح البيانات المحلية بعد النقل الناجح
@@ -54,14 +50,8 @@ export class CustomerCodeService {
     };
 
     try {
-      const { data: inserted, error } = await supabase
-        .from('customer_codes')
-        .insert([newData])
-        .select()
-        .single();
-
-      if (error) throw error;
-      return inserted;
+      await dbOperation('set', 'customer_codes', newData, newData.id);
+      return newData;
     } catch (error) {
       console.error('Failed to create customer code in database, saving locally:', error);
       // حفظ محلياً عند فشل قاعدة البيانات
@@ -72,12 +62,7 @@ export class CustomerCodeService {
 
   static async approvePendingCode(id: string, code: string): Promise<void> {
     try {
-      const { error } = await supabase
-        .from('customer_codes')
-        .update({ status: 'approved', is_active: true, code })
-        .eq('id', id);
-
-      if (error) throw error;
+      await dbOperation('update', 'customer_codes', { status: 'approved', is_active: true, code }, id);
     } catch (error) {
       console.error('Failed to approve code:', error);
       throw new Error('Unable to approve code.');
@@ -86,15 +71,9 @@ export class CustomerCodeService {
 
   static async getCustomerCodeByCode(code: string): Promise<CustomerCodeData | null> {
     try {
-      const { data, error } = await supabase
-        .from('customer_codes')
-        .select('*')
-        .eq('code', code)
-        .eq('is_active', true)
-        .single();
-
-      if (error) return null;
-      return data;
+      const allCodes = await dbOperation('get', 'customer_codes');
+      const found = allCodes.find((c: any) => c.code === code && c.is_active);
+      return found || null;
     } catch (error) {
       console.error('Failed to get customer code:', error);
       return null;
