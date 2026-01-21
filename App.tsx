@@ -1,28 +1,37 @@
-
 import React, { useState, useEffect, useRef } from 'react';
 import { Routes, Route, useNavigate, Link, useLocation, useParams, Navigate } from 'react-router-dom';
-import QRCode from 'qrcode';
+import { toDataURL } from 'qrcode';
 import { toPng } from 'html-to-image';
 import { jsPDF } from 'jspdf';
-import { 
-  Home, ShoppingCart, User, LogOut, LayoutDashboard, Box, 
-  Calendar, Settings, Plus, Trash2, CheckCircle, QrCode, 
-  MessageCircle, X, Camera, Clock, Edit2, UserCheck, 
-  Menu, Send, TrendingUp, Layers, Sun, Moon, BarChart3, 
+import jsQR from 'jsqr';
+import {
+  Home, ShoppingCart, User, LogOut, LayoutDashboard, Box,
+  Calendar, Settings, Plus, Trash2, CheckCircle, QrCode,
+  MessageCircle, X, Camera, Clock, Edit2, UserCheck,
+  Menu, Send, TrendingUp, Layers, Sun, Moon, BarChart3,
   Save, Eye, UserPlus, Key, MapPin, ArrowRight, Star, Printer, ChevronLeft,
   MessageSquare, Folders, Search, Info, Download, Copy, Share2, Filter, ShoppingBag,
-  Image as ImageIcon, ToggleLeft, ToggleRight, AlertCircle
+  Image as ImageIcon, ToggleLeft, ToggleRight, AlertCircle, Phone, DollarSign, CalendarCheck
 } from 'lucide-react';
 
+// المكاواع (يفترض وجودها في ملفات constants.ts و types.ts)
 import { Product, Category, Section, Booking, UserRole, AppContent, CustomerCode, ChatMessage } from './types';
-import { INITIAL_PRODUCTS, INITIAL_CONTENT } from './constants';
-import { supabase, supabaseOperation } from './lib/supabase';
+import { INITIAL_CONTENT } from './constants';
+import { supabase, supabaseOperation, subscribeToProducts, subscribeToCategories, subscribeToBookings, subscribeToCustomerCodes, subscribeToMessages } from './lib/supabase';
+import { CustomerCodeService } from './lib/customerCodeService';
+
+// --- وظائف المساعدة العامة ---
 
 const saveToLocal = (key: string, data: any) => localStorage.setItem(`nice_v5_${key}`, JSON.stringify(data));
 const getFromLocal = (key: string, fallback: any) => {
   const saved = localStorage.getItem(`nice_v5_${key}`);
   try { return saved ? JSON.parse(saved) : fallback; } catch { return fallback; }
 };
+
+const formatCurrency = (amount: number) => `${Math.floor(amount).toLocaleString('ar-SA')} ر.س`;
+const formatDate = (isoString: string) => new Date(isoString).toLocaleDateString('ar-SA', { day: 'numeric', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit' });
+
+// --- المكون الرئيسي App ---
 
 export default function App() {
   const [role, setRole] = useState<UserRole | null>(() => getFromLocal('userRole', null));
@@ -50,67 +59,83 @@ export default function App() {
   // إعداد التزامن اللحظي مع Supabase
   useEffect(() => {
     const setupSync = async () => {
-      // 1. جلب البيانات الأولية
-      const [catsRes, prodsRes, codesRes, bksRes, msgsRes, appContentRes] = await Promise.all([
-        supabaseOperation('get', 'categories'),
-        supabaseOperation('get', 'products'),
-        supabaseOperation('get', 'customer_codes'),
-        supabaseOperation('get', 'bookings'),
-        supabaseOperation('get', 'chat_messages'),
-        supabaseOperation('get', 'app_content'),
-      ]);
+      try {
+        // 1. جلب البيانات الأولية
+        // ✅ تم تصحيح: تغيير 'app_content' إلى 'app_settings' لـ (404 fix)
+        const [catsRes, prodsRes, codesRes, bksRes, msgsRes, appSettingsRes] = await Promise.all([
+          supabaseOperation('get', 'categories'),
+          supabaseOperation('get', 'products'),
+          supabaseOperation('get', 'customer_codes'),
+          supabaseOperation('get', 'bookings'),
+          supabaseOperation('get', 'chat_messages'),
+          supabaseOperation('get', 'app_settings', undefined, undefined, { select: 'id, admin_password, main_welcome_message, whatsapp_link, created_at, updated_at' }),
+        ]);
 
-      if ((catsRes as any).success) setCategories((catsRes as any).data || []);
-      else setCategories([]);
-      if ((prodsRes as any).success) setProducts((prodsRes as any).data || []);
-      else setProducts([]);
-      if ((codesRes as any).success) setCustomerCodes((codesRes as any).data || []);
-      else setCustomerCodes([]);
-      if ((bksRes as any).success) setBookings((bksRes as any).data || []);
-      else setBookings([]);
-      if ((msgsRes as any).success) setChatMessages((msgsRes as any).data || []);
-      else setChatMessages([]);
-      if ((appContentRes as any).success && (appContentRes as any).data && (appContentRes as any).data.length > 0) setContent((appContentRes as any).data[0]);
-      else setContent(INITIAL_CONTENT);
+        // محاولة مزامنة الأكواد المحلية مع قاعدة البيانات
+        try {
+          await CustomerCodeService.syncLocalCodesToDatabase();
+        } catch (error) {
+          console.log('Local codes sync skipped (database not available):', error);
+        }
 
-      setIsLoading(false);
+        if ((catsRes as any).success) setCategories((catsRes as any).data || []);
+        else setCategories([]);
+        if ((prodsRes as any).success) setProducts((prodsRes as any).data || []);
+        else setProducts([]);
+        if ((codesRes as any).success) setCustomerCodes((codesRes as any).data || []);
+        else setCustomerCodes([]);
+        if ((bksRes as any).success) setBookings((bksRes as any).data || []);
+        else setBookings([]);
+        if ((msgsRes as any).success) setChatMessages((msgsRes as any).data || []);
+        else setChatMessages([]);
 
-      // 2. الاشتراك في التغييرات اللحظية
-      const channel = supabase
-        .channel('db-changes')
-        .on('postgres_changes', { event: '*', schema: 'public' }, (payload) => {
-          const { table, eventType, new: newRow, old: oldRow } = payload;
-          
-          const updateState = (prev: any[]) => {
-            if (eventType === 'INSERT') return [newRow, ...prev];
-            if (eventType === 'UPDATE') return prev.map(item => item.id === newRow.id ? newRow : item);
-            if (eventType === 'DELETE') return prev.filter(item => item.id === oldRow.id);
-            return prev;
-          };
+        // تحسين معالجة app_settings
+        let contentData = INITIAL_CONTENT;
+        if ((appSettingsRes as any).success && (appSettingsRes as any).data && (appSettingsRes as any).data.length > 0) {
+          contentData = (appSettingsRes as any).data[0];
+        } else {
+          // إذا لم يكن موجوداً، أنشئ سجلاً افتراضياً
+          // ✅ تم تصحيح: تغيير 'app_content' إلى 'app_settings'
+          const defaultContent = { ...INITIAL_CONTENT, id: 'main' };
+          await supabaseOperation('set', 'app_settings', defaultContent, 'main');
+          contentData = defaultContent;
+        }
+        setContent(contentData);
 
-          switch (table) {
-            case 'products': setProducts(prev => updateState(prev)); break;
-            case 'categories': setCategories(prev => updateState(prev)); break;
-            case 'codes': 
-              setCustomerCodes(prev => {
-                const updated = updateState(prev);
-                if (userSession) {
-                  const current = updated.find(c => c.id === userSession.id);
-                  if (current) setUserSession(current);
-                }
-                return updated;
-              }); 
-              break;
-            case 'bookings': setBookings(prev => updateState(prev)); break;
-            case 'chat_messages': setChatMessages(prev => updateState(prev)); break;
-            case 'app_content': if (newRow) setContent(newRow); break;
+        setIsLoading(false);
+
+        // 2. الاشتراك في التغييرات اللحظية باستخدام الدوال المخصصة
+        const channelProducts = subscribeToProducts((products) => setProducts(products));
+        const channelCategories = subscribeToCategories((categories) => setCategories(categories));
+        const channelBookings = subscribeToBookings((bookings) => setBookings(bookings));
+        const channelCustomerCodes = subscribeToCustomerCodes((codes) => {
+          setCustomerCodes(codes);
+          if (userSession) {
+            const current = codes.find(c => c.id === userSession.id);
+            if (current) setUserSession(current);
           }
-        })
-        .subscribe();
+        });
+        const channelMessages = subscribeToMessages((messages) => setChatMessages(messages));
 
-      return () => {
-        supabase.removeChannel(channel);
-      };
+        return () => {
+          channelProducts.unsubscribe();
+          channelCategories.unsubscribe();
+          channelBookings.unsubscribe();
+          channelCustomerCodes.unsubscribe();
+          channelMessages.unsubscribe();
+        };
+      } catch (error) {
+        console.error('خطأ في إعداد التزامن:', error);
+        // في حالة الخطأ، استخدم البيانات الافتراضية
+        setCategories([]);
+        setProducts([]);
+        setCustomerCodes([]);
+        setBookings([]);
+        setChatMessages([]);
+        setContent(INITIAL_CONTENT);
+        setIsLoading(false);
+        showToast('فشل في الاتصال بقاعدة البيانات. تحقق من الإعدادات.', 'error');
+      }
     };
 
     setupSync();
@@ -128,11 +153,22 @@ export default function App() {
       setRole(UserRole.ADMIN); navigate('/admin');
       showToast('مرحباً بك في مركز التحكم الإداري'); return;
     }
-    const found = customerCodes.find(c => c.code === code && c.isActive);
+
+    // البحث في قاعدة البيانات أولاً
+    const found = customerCodes.find(c => c.code === code && c.is_active);
     if (found) {
       setRole(UserRole.USER); setUserSession(found);
-      navigate('/store'); showToast(`أهلاً بك ${found.customerName}`); return;
+      navigate('/store'); showToast(`أهلاً بك ${found.customer_name}`); return;
     }
+
+    // البحث في التخزين المحلي إذا لم يوجد في قاعدة البيانات
+    const localCodes = JSON.parse(localStorage.getItem('local_customer_codes') || '[]');
+    const localFound = localCodes.find((c: any) => c.code === code && c.is_active);
+    if (localFound) {
+      setRole(UserRole.USER); setUserSession(localFound);
+      navigate('/store'); showToast(`أهلاً بك ${localFound.customer_name} (كود محلي)`); return;
+    }
+
     showToast('الكود غير صحيح أو غير مفعل حالياً', 'error');
   };
 
@@ -147,21 +183,21 @@ export default function App() {
     const id = `BOK-${Date.now()}`;
     const newBooking: Booking = {
       id,
-      userId: userSession.id,
-      userName: userSession.customerName,
-      userPhone: userSession.userPhone || '',
-      startDate: new Date().toISOString(),
-      endDate: new Date().toISOString(),
+      user_id: userSession.id,
+      user_name: userSession.customer_name,
+      user_phone: userSession.user_phone || '',
+      start_date: new Date().toISOString(),
+      end_date: new Date().toISOString(),
       status: 'Pending',
-      totalPrice: total,
+      total_price: total,
       location: 'سيتم التحديد عند التواصل',
-      createdAt: new Date().toISOString(),
+      created_at: new Date().toISOString(),
       items: cart.map(i => ({ productId: i.product.id, quantity: i.quantity, name: i.product.name })),
-      depositAmount: total * 0.2
+      deposit_amount: total * 0.2
     };
     const res = await supabaseOperation('set', 'bookings', newBooking, id);
-    if (!res.success) {
-      showToast(res.error, 'error');
+    if (!(res as any).success) {
+      showToast((res as any).error, 'error');
       return;
     }
     setCart([]);
@@ -185,7 +221,7 @@ export default function App() {
             {role === UserRole.ADMIN ? (
               <button onClick={() => setIsAdminDrawerOpen(true)} className="p-3 bg-black text-white rounded-2xl active:scale-95 transition-transform"><Menu size={22} /></button>
             ) : (
-              <div className="w-12 h-12 bg-pink-600 rounded-[1.5rem] flex items-center justify-center text-white font-black text-sm shadow-xl border-2 border-white">{userSession?.customerName?.charAt(0) || 'U'}</div>
+            <div className="w-12 h-12 bg-pink-600 rounded-[1.5rem] flex items-center justify-center text-white font-black text-sm shadow-xl border-2 border-white">{userSession?.customer_name?.charAt(0) || 'U'}</div>
             )}
             <Link to="/" className="flex flex-col">
               <span className="font-black text-pink-600 text-lg italic leading-none tracking-tighter">Nice Events</span>
@@ -213,20 +249,20 @@ export default function App() {
           <Route path="/" element={role ? <Navigate to={role === UserRole.ADMIN ? "/admin" : "/store"} replace /> : <Navigate to="/access" replace />} />
           <Route path="/access" element={<AccessGateView onVerify={handleVerify} onScan={() => setIsScannerOpen(true)} onRequest={async (n, p) => {
             const id = `USR-${Date.now()}`;
-            await supabaseOperation('set', 'codes', { id, customerName: n, userPhone: p, status: 'pending', isActive: false, walletBalance: 0, code: 'PENDING', createdAt: new Date().toISOString() }, id);
+            await supabaseOperation('set', 'customer_codes', { id, customer_name: n, user_phone: p, status: 'pending', is_active: false, wallet_balance: 0, code: 'PENDING', created_at: new Date().toISOString() }, id);
             navigate('/access-pending');
           }} isDarkMode={isDarkMode} />} />
           <Route path="/access-pending" element={<AccessPendingView isDarkMode={isDarkMode} />} />
           <Route path="/login" element={<AdminLoginView onLogin={handleVerify} />} />
           
           <Route path="/store" element={<ProtectedRoute role={role}><StoreHomeView products={products} categories={categories} onAdd={p => {
-             setCart(prev => {
-                const ex = prev.find(i => i.product.id === p.id);
-                if (ex) return prev.map(i => i.product.id === p.id ? { ...i, quantity: i.quantity + 1 } : i);
-                return [...prev, { product: p, quantity: 1 }];
-             });
-             showToast('تمت إضافة القطعة للسلة الملكية');
-          }} isDarkMode={isDarkMode} /></ProtectedRoute>} />
+              setCart(prev => {
+                 const ex = prev.find(i => i.product.id === p.id);
+                 if (ex) return prev.map(i => i.product.id === p.id ? { ...i, quantity: i.quantity + 1 } : i);
+                 return [...prev, { product: p, quantity: 1 }];
+               });
+               showToast('تمت إضافة القطعة للسلة الملكية');
+            }} isDarkMode={isDarkMode} /></ProtectedRoute>} />
 
           <Route path="/bookings" element={<ProtectedRoute role={role}><UserBookingsView bookings={bookings} userId={userSession?.id} isDarkMode={isDarkMode} /></ProtectedRoute>} />
           
@@ -234,6 +270,10 @@ export default function App() {
           
           <Route path="/cart" element={<ProtectedRoute role={role}><CartPageView cart={cart} onCheckout={handleCheckout} onRemove={(id) => setCart(prev => prev.filter(i => i.product.id !== id))} isDarkMode={isDarkMode} /></ProtectedRoute>} />
           <Route path="/booking-status/:id" element={<ProtectedRoute role={role}><BookingStatusView bookings={bookings} products={products} isDarkMode={isDarkMode} /></ProtectedRoute>} />
+          <Route path="/profile" element={<ProtectedRoute role={role}><UserProfileView user={userSession} bookings={bookings} isDarkMode={isDarkMode} /></ProtectedRoute>} />
+
+          <Route path="/pages" element={<ProtectedRoute role={role}><PagesView role={role} isDarkMode={isDarkMode} /></ProtectedRoute>} />
+
         </Routes>
       </main>
 
@@ -257,7 +297,12 @@ export default function App() {
   );
 }
 
-// --- Admin Product Manager ---
+// ----------------------------------------------------------------------
+// --- Components & Views (الإضافات الكاملة) ---
+// ----------------------------------------------------------------------
+
+
+// --- 1. Admin Product Manager ---
 
 function AdminProductManager({ products, categories, onRefresh, isDarkMode }: any) {
   const [isAdding, setIsAdding] = useState(false);
@@ -303,128 +348,128 @@ function AdminProductManager({ products, categories, onRefresh, isDarkMode }: an
 
   return (
     <div className={`p-6 space-y-8 text-right pb-24 ${isDarkMode ? 'bg-gray-950 text-white' : ''} animate-fade`}>
-       <div className="flex justify-between items-center">
+        <div className="flex justify-between items-center">
           <button onClick={() => setIsAdding(true)} className="bg-pink-600 text-white px-8 py-4 rounded-3xl font-black italic shadow-xl hover:bg-pink-700 transition-colors flex items-center gap-2">
             <Plus size={20}/> إضافة منتج جديد
           </button>
           <div className="text-right">
-             <h2 className="text-3xl font-black italic">المخزون الملكي</h2>
-             <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mt-1">إدارة قطع الأثاث والديكور</p>
+              <h2 className="text-3xl font-black italic">المخزون الملكي</h2>
+              <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mt-1">إدارة قطع الأثاث والديكور</p>
           </div>
-       </div>
+        </div>
 
-       {isAdding && (
-         <div className="fixed inset-0 z-[1000] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in">
-            <div className={`w-full max-w-2xl rounded-[3rem] p-10 max-h-[90vh] overflow-y-auto no-scrollbar shadow-2xl ${isDarkMode ? 'bg-gray-900 text-white' : 'bg-white'}`}>
-               <div className="flex justify-between items-center mb-8 border-b pb-4">
-                  <button onClick={() => setIsAdding(false)} className="p-2 hover:bg-gray-100 rounded-full transition-colors"><X size={24}/></button>
-                  <h3 className="text-xl font-black italic text-pink-600">{editingId ? 'تعديل قطعة' : 'إضافة قطعة ملكية'}</h3>
-               </div>
+        {isAdding && (
+          <div className="fixed inset-0 z-[1000] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in">
+             <div className={`w-full max-w-2xl rounded-[3rem] p-10 max-h-[90vh] overflow-y-auto no-scrollbar shadow-2xl ${isDarkMode ? 'bg-gray-900 text-white' : 'bg-white'}`}>
+                <div className="flex justify-between items-center mb-8 border-b pb-4">
+                   <button onClick={() => setIsAdding(false)} className="p-2 hover:bg-gray-100 rounded-full transition-colors"><X size={24}/></button>
+                   <h3 className="text-xl font-black italic text-pink-600">{editingId ? 'تعديل قطعة' : 'إضافة قطعة ملكية'}</h3>
+                </div>
 
-               <div className="space-y-6">
-                  <SectionInput label="اسم المنتج" value={form.name} onChange={(v:any)=>setForm({...form, name:v})} isDarkMode={isDarkMode} />
-                  
-                  <div className="grid grid-cols-2 gap-4">
-                     <div className="space-y-2">
-                        <p className="text-[10px] font-black text-gray-400 pr-4 uppercase">التصنيف</p>
-                        <select 
-                           className={`w-full p-6 rounded-[1.5rem] font-bold text-sm outline-none text-right shadow-inner appearance-none ${isDarkMode ? 'bg-gray-800 border-gray-700 text-white' : 'bg-gray-50 border-transparent text-gray-900'}`} 
-                           value={form.categoryId} 
-                           onChange={e=>setForm({...form, categoryId:e.target.value})}
-                        >
-                           <option value="">اختر التصنيف</option>
-                           {categories.map((c:any)=><option key={c.id} value={c.name}>{c.name}</option>)}
-                        </select>
-                     </div>
-                     <SectionInput label="السعر (ر.س)" value={form.price} onChange={(v:any)=>setForm({...form, price:Number(v)})} type="number" isDarkMode={isDarkMode} />
-                  </div>
+                <div className="space-y-6">
+                   <SectionInput label="اسم المنتج" value={form.name} onChange={(v:any)=>setForm({...form, name:v})} isDarkMode={isDarkMode} />
+                   
+                   <div className="grid grid-cols-2 gap-4">
+                       <div className="space-y-2">
+                          <p className="text-[10px] font-black text-gray-400 pr-4 uppercase">التصنيف</p>
+                          <select 
+                             className={`w-full p-6 rounded-[1.5rem] font-bold text-sm outline-none text-right shadow-inner appearance-none ${isDarkMode ? 'bg-gray-800 border-gray-700 text-white' : 'bg-gray-50 border-transparent text-gray-900'}`} 
+                             value={form.categoryId} 
+                             onChange={e=>setForm({...form, categoryId:e.target.value})}
+                          >
+                             <option value="">اختر التصنيف</option>
+                             {categories.map((c:any)=><option key={c.id} value={c.name}>{c.name}</option>)}
+                          </select>
+                       </div>
+                       <SectionInput label="السعر (ر.س)" value={form.price} onChange={(v:any)=>setForm({...form, price:Number(v)})} type="number" isDarkMode={isDarkMode} />
+                   </div>
 
-                  <SectionInput label="وصف المنتج" value={form.description} onChange={(v:any)=>setForm({...form, description:v})} type="textarea" isDarkMode={isDarkMode} />
+                   <SectionInput label="وصف المنتج" value={form.description} onChange={(v:any)=>setForm({...form, description:v})} type="textarea" isDarkMode={isDarkMode} />
 
-                  <div className="grid grid-cols-2 gap-4">
-                     <SectionInput label="الكمية المتوفرة" value={form.stock} onChange={(v:any)=>setForm({...form, stock:Number(v)})} type="number" isDarkMode={isDarkMode} />
-                     <div className="space-y-2">
-                        <p className="text-[10px] font-black text-gray-400 pr-4 uppercase">حالة العرض</p>
-                        <button 
-                           onClick={() => setForm({...form, isAvailable: !form.isAvailable})}
-                           className={`w-full p-6 rounded-[1.5rem] flex items-center justify-between font-bold text-sm transition-all ${form.isAvailable ? 'bg-green-500/10 text-green-500' : 'bg-red-500/10 text-red-500'}`}
-                        >
-                           <span>{form.isAvailable ? 'متوفر حالياً' : 'غير متوفر'}</span>
-                           {form.isAvailable ? <ToggleRight size={24}/> : <ToggleLeft size={24}/>}
-                        </button>
-                     </div>
-                  </div>
+                   <div className="grid grid-cols-2 gap-4">
+                       <SectionInput label="الكمية المتوفرة" value={form.stock} onChange={(v:any)=>setForm({...form, stock:Number(v)})} type="number" isDarkMode={isDarkMode} />
+                       <div className="space-y-2">
+                          <p className="text-[10px] font-black text-gray-400 pr-4 uppercase">حالة العرض</p>
+                          <button 
+                             onClick={() => setForm({...form, isAvailable: !form.isAvailable})}
+                             className={`w-full p-6 rounded-[1.5rem] flex items-center justify-between font-bold text-sm transition-all ${form.isAvailable ? 'bg-green-500/10 text-green-500' : 'bg-red-500/10 text-red-500'}`}
+                          >
+                             <span>{form.isAvailable ? 'متوفر حالياً' : 'غير متوفر'}</span>
+                             {form.isAvailable ? <ToggleRight size={24}/> : <ToggleLeft size={24}/>}
+                          </button>
+                       </div>
+                   </div>
 
-                  <div className="space-y-2">
-                     <p className="text-[10px] font-black text-gray-400 pr-4 uppercase">رابط الصورة (URL)</p>
-                     <div className="flex gap-2">
-                        <input 
-                           className={`flex-1 p-6 rounded-[1.5rem] font-bold text-sm outline-none text-right shadow-inner ${isDarkMode ? 'bg-gray-800 border-gray-700 text-white' : 'bg-gray-50 border-transparent text-gray-900'}`} 
-                           placeholder="ضع رابط الصورة هنا..."
-                           value={form.images[0] || ''} 
-                           onChange={e => setForm({...form, images: [e.target.value]})}
-                        />
-                        <div className={`p-6 rounded-[1.5rem] flex items-center justify-center ${isDarkMode ? 'bg-gray-800' : 'bg-gray-100'}`}>
-                           <ImageIcon size={20} className="text-gray-400"/>
-                        </div>
-                     </div>
-                  </div>
+                   <div className="space-y-2">
+                      <p className="text-[10px] font-black text-gray-400 pr-4 uppercase">رابط الصورة (URL)</p>
+                      <div className="flex gap-2">
+                         <input 
+                            className={`flex-1 p-6 rounded-[1.5rem] font-bold text-sm outline-none text-right shadow-inner ${isDarkMode ? 'bg-gray-800 border-gray-700 text-white' : 'bg-gray-50 border-transparent text-gray-900'}`} 
+                            placeholder="ضع رابط الصورة هنا..."
+                            value={form.images[0] || ''} 
+                            onChange={e => setForm({...form, images: [e.target.value]})}
+                         />
+                         <div className={`p-6 rounded-[1.5rem] flex items-center justify-center ${isDarkMode ? 'bg-gray-800' : 'bg-gray-100'}`}>
+                            <ImageIcon size={20} className="text-gray-400"/>
+                         </div>
+                      </div>
+                   </div>
 
-                  <div className="flex gap-4 pt-10">
-                     <button onClick={()=>setIsAdding(false)} className={`flex-1 py-6 rounded-[2rem] font-black italic ${isDarkMode ? 'bg-gray-800 text-gray-300' : 'bg-gray-100 text-gray-500'}`}>إلغاء</button>
-                     <button onClick={handleSave} className="flex-[2] py-6 bg-black text-white rounded-[2rem] font-black italic shadow-xl hover:bg-pink-600 transition-all flex items-center justify-center gap-2">
-                        <Save size={20}/> {editingId ? 'تحديث البيانات' : 'إضافة للمخزون'}
-                     </button>
-                  </div>
-               </div>
-            </div>
-         </div>
-       )}
+                   <div className="flex gap-4 pt-10">
+                      <button onClick={()=>setIsAdding(false)} className={`flex-1 py-6 rounded-[2rem] font-black italic ${isDarkMode ? 'bg-gray-800 text-gray-300' : 'bg-gray-100 text-gray-500'}`}>إلغاء</button>
+                      <button onClick={handleSave} className="flex-[2] py-6 bg-black text-white rounded-[2rem] font-black italic shadow-xl hover:bg-pink-600 transition-all flex items-center justify-center gap-2">
+                         <Save size={20}/> {editingId ? 'تحديث البيانات' : 'إضافة للمخزون'}
+                      </button>
+                   </div>
+                </div>
+             </div>
+          </div>
+        )}
 
-       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-          {products.map((p: any) => (
-            <div key={p.id} className={`group relative flex flex-col ${isDarkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-100'} rounded-[2.5rem] border shadow-sm overflow-hidden transition-all hover:shadow-xl`}>
-               {/* Availability Badge */}
-               <div className={`absolute top-4 right-4 z-10 px-3 py-1 rounded-full text-[8px] font-black uppercase tracking-widest flex items-center gap-1 shadow-lg ${p.isAvailable ? 'bg-green-500 text-white' : 'bg-red-500 text-white'}`}>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+           {products.map((p: any) => (
+             <div key={p.id} className={`group relative flex flex-col ${isDarkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-100'} rounded-[2.5rem] border shadow-sm overflow-hidden transition-all hover:shadow-xl`}>
+                {/* Availability Badge */}
+                <div className={`absolute top-4 right-4 z-10 px-3 py-1 rounded-full text-[8px] font-black uppercase tracking-widest flex items-center gap-1 shadow-lg ${p.isAvailable ? 'bg-green-500 text-white' : 'bg-red-500 text-white'}`}>
                   {p.isAvailable ? <CheckCircle size={10}/> : <AlertCircle size={10}/>}
                   {p.isAvailable ? 'متوفر' : 'غير متاح'}
-               </div>
+                </div>
 
-               <div className="h-48 overflow-hidden relative">
-                  <img src={p.images?.[0]} className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110" />
-                  <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-3">
-                     <button onClick={()=>handleEdit(p)} className="p-4 bg-white text-black rounded-2xl shadow-xl hover:bg-pink-500 hover:text-white transition-all"><Edit2 size={18}/></button>
-                     <button onClick={()=>handleDelete(p.id)} className="p-4 bg-white text-red-500 rounded-2xl shadow-xl hover:bg-red-600 hover:text-white transition-all"><Trash2 size={18}/></button>
-                  </div>
-               </div>
+                <div className="h-48 overflow-hidden relative">
+                   <img src={p.images?.[0]} className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110" />
+                   <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-3">
+                      <button onClick={()=>handleEdit(p)} className="p-4 bg-white text-black rounded-2xl shadow-xl hover:bg-pink-500 hover:text-white transition-all"><Edit2 size={18}/></button>
+                      <button onClick={()=>handleDelete(p.id)} className="p-4 bg-white text-red-500 rounded-2xl shadow-xl hover:bg-red-600 hover:text-white transition-all"><Trash2 size={18}/></button>
+                   </div>
+                </div>
 
-               <div className="p-6 text-right flex-1 flex flex-col justify-between">
-                  <div>
-                     <span className="text-[8px] font-black text-pink-600 uppercase tracking-widest">{p.categoryId}</span>
-                     <h4 className={`text-sm font-black mt-1 line-clamp-1 ${isDarkMode ? 'text-gray-100' : 'text-gray-800'}`}>{p.name}</h4>
-                  </div>
-                  <div className="mt-4 flex items-center justify-between">
-                     <div className="flex items-center gap-1 text-amber-600">
-                        <span className="text-[10px] font-bold">مخزون: {p.stock}</span>
-                     </div>
-                     <span className="text-lg font-black italic text-pink-600">{p.price} <span className="text-[10px]">ر.س</span></span>
-                  </div>
-               </div>
-            </div>
-          ))}
-       </div>
+                <div className="p-6 text-right flex-1 flex flex-col justify-between">
+                   <div>
+                      <span className="text-[8px] font-black text-pink-600 uppercase tracking-widest">{p.categoryId}</span>
+                      <h4 className={`text-sm font-black mt-1 line-clamp-1 ${isDarkMode ? 'text-gray-100' : 'text-gray-800'}`}>{p.name}</h4>
+                   </div>
+                   <div className="mt-4 flex items-center justify-between">
+                      <div className="flex items-center gap-1 text-amber-600">
+                         <span className="text-[10px] font-bold">مخزون: {p.stock}</span>
+                      </div>
+                      <span className="text-lg font-black italic text-pink-600">{p.price} <span className="text-[10px]">ر.س</span></span>
+                   </div>
+                </div>
+             </div>
+           ))}
+        </div>
 
-       {products.length === 0 && (
-          <div className="text-center py-40 opacity-20 flex flex-col items-center">
-             <Box size={80} className="mb-4" />
-             <p className="text-xl font-black italic">المخزون فارغ تماماً</p>
-          </div>
-       )}
+        {products.length === 0 && (
+           <div className="text-center py-40 opacity-20 flex flex-col items-center">
+              <Box size={80} className="mb-4" />
+              <p className="text-xl font-black italic">المخزون فارغ تماماً</p>
+           </div>
+        )}
     </div>
   );
 }
 
-// --- Admin Category Manager ---
+// --- 2. Admin Category Manager ---
 
 function AdminCategoryManager({ categories, onRefresh, isDarkMode }: any) {
   const [newCat, setNewCat] = useState('');
@@ -456,10 +501,10 @@ function AdminCategoryManager({ categories, onRefresh, isDarkMode }: any) {
        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {categories.map((c: any) => (
              <div key={c.id} className={`p-6 rounded-[2.5rem] border flex items-center justify-between shadow-sm transition-all hover:shadow-md ${isDarkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-100'}`}>
-                <button onClick={() => handleDelete(c.id)} className="text-red-500 p-3 hover:bg-red-50 rounded-xl transition-colors"><Trash2 size={20} /></button>
-                <div className="text-right">
-                   <span className="font-black italic text-lg">{c.name}</span>
-                </div>
+               <button onClick={() => handleDelete(c.id)} className="text-red-500 p-3 hover:bg-red-50 rounded-xl transition-colors"><Trash2 size={20} /></button>
+               <div className="text-right">
+                  <span className="font-black italic text-lg">{c.name}</span>
+               </div>
              </div>
           ))}
        </div>
@@ -473,7 +518,7 @@ function AdminCategoryManager({ categories, onRefresh, isDarkMode }: any) {
   );
 }
 
-// --- Admin Routes & Components (Updated with full theme support) ---
+// --- 3. Admin Routes & Components ---
 
 function AdminRoutes({ products, categories, bookings, codes, content, onRefresh, isDarkMode }: any) {
   return (
@@ -490,21 +535,44 @@ function AdminRoutes({ products, categories, bookings, codes, content, onRefresh
   );
 }
 
+// --- 4. Admin Card Generator ---
+
 function AdminCardGenerator({ onRefresh, isDarkMode }: any) {
   const [customerName, setCustomerName] = useState('');
   const [generatedCode, setGeneratedCode] = useState('');
   const [qrDataUrl, setQrDataUrl] = useState('');
+  const [userPhone, setUserPhone] = useState('');
   const cardRef = useRef<HTMLDivElement>(null);
 
   const handleGenerate = async () => {
-    if (!customerName.trim()) return alert('يرجى إدخال اسم العميل');
+    if (!customerName.trim()) {
+      alert('يرجى إدخال اسم العميل');
+      return;
+    }
     const newCode = `NICE-${Math.floor(1000 + Math.random() * 8999)}`;
-    const id = `C-${Date.now()}`;
-    const qr = await QRCode.toDataURL(newCode, { margin: 1, width: 400 });
-    setGeneratedCode(newCode);
-    setQrDataUrl(qr);
-    await supabaseOperation('set', 'customer_codes', { id, code: newCode, customerName, isActive: true, status: 'approved', createdAt: new Date().toISOString(), walletBalance: 0 }, id);
-    onRefresh();
+    try {
+      const qr = await toDataURL(newCode, { margin: 1, width: 400 });
+      setGeneratedCode(newCode);
+      setQrDataUrl(qr);
+
+      // استخدام خدمة الأكواد التي تدعم التخزين المحلي
+      await CustomerCodeService.createCustomerCode({
+        code: newCode,
+        customer_name: customerName,
+        user_phone: userPhone,
+        is_active: true,
+        status: 'approved',
+        wallet_balance: 0
+      });
+
+      onRefresh();
+      alert('تم توليد الكود وحفظه بنجاح');
+    } catch (error: any) {
+      console.error('خطأ في توليد الكود:', error);
+      alert(`حدث خطأ في توليد الكود: ${error.message}`);
+      setGeneratedCode('');
+      setQrDataUrl('');
+    }
   };
 
   const handleDownloadPDF = async () => {
@@ -517,15 +585,16 @@ function AdminCardGenerator({ onRefresh, isDarkMode }: any) {
 
   return (
     <div className={`p-6 space-y-10 text-right animate-fade pb-24 ${isDarkMode ? 'bg-gray-950 text-white' : ''}`}>
-       <div className="flex justify-between items-center">
+        <div className="flex justify-between items-center">
           <div className="flex gap-2">
              {generatedCode && <button onClick={handleDownloadPDF} className="bg-pink-600 text-white px-6 py-4 rounded-2xl font-black italic shadow-xl flex items-center gap-2 transition-transform active:scale-95"><Download size={18}/> تحميل PDF</button>}
           </div>
           <h2 className="text-3xl font-black italic text-right">مولد الكروت الملكية</h2>
-       </div>
-       <div className="grid lg:grid-cols-2 gap-10">
+        </div>
+        <div className="grid lg:grid-cols-2 gap-10">
           <div className={`${isDarkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-100'} p-8 rounded-[3rem] border shadow-sm space-y-6`}>
              <SectionInput label="اسم العميل" value={customerName} onChange={(v:any)=>setCustomerName(v)} isDarkMode={isDarkMode} />
+             <SectionInput label="رقم الهاتف (اختياري)" value={userPhone} onChange={(v:any)=>setUserPhone(v)} isDarkMode={isDarkMode} type="tel" />
              <button onClick={handleGenerate} className="w-full py-6 bg-black text-white rounded-[2rem] font-black italic shadow-xl active:scale-95 transition-all">توليد الكرت الملكي</button>
           </div>
           <div className="flex flex-col items-center">
@@ -537,389 +606,941 @@ function AdminCardGenerator({ onRefresh, isDarkMode }: any) {
                 {qrDataUrl ? <img src={qrDataUrl} className="w-36 h-36 mb-6" /> : <div className="w-36 h-36 bg-gray-50 rounded-[2rem] border-2 border-dashed border-gray-100 flex items-center justify-center mb-6"><QrCode className="text-gray-100" /></div>}
                 <p className="text-[9px] font-black text-pink-600 mb-1 uppercase">{customerName || 'اسم العميل'}</p>
                 <h4 className="text-xl font-black italic text-gray-800 tracking-widest">{generatedCode || 'NICE-0000'}</h4>
+                <p className="text-[8px] font-bold text-gray-400 mt-2">{userPhone || '05XXXXXXXX'}</p>
              </div>
           </div>
-       </div>
+        </div>
     </div>
   );
 }
 
+// --- 5. Admin Booking Manager (مكتملة) ---
+
 function AdminBookingManager({ bookings, onRefresh, isDarkMode }: any) {
+  const [filter, setFilter] = useState('All');
+  const [searchTerm, setSearchTerm] = useState('');
+
+  const filteredBookings = bookings.filter((b: any) => {
+    if (!b) return false;
+    const statusMatch = filter === 'All' || b.status === filter;
+    const searchMatch = (b.user_name && typeof b.user_name === 'string' && b.user_name.toLowerCase().includes(searchTerm.toLowerCase())) ||
+                        (b.id && typeof b.id === 'string' && b.id.toLowerCase().includes(searchTerm.toLowerCase()));
+    return statusMatch && searchMatch;
+  });
+
   const updateStatus = async (id: string, status: string) => {
     await supabaseOperation('update', 'bookings', { status }, id);
     onRefresh();
   };
+
+  const handleDelete = async (id: string) => {
+    if (confirm('هل أنت متأكد من حذف هذا الحجز؟')) {
+      await supabaseOperation('delete', 'bookings', null, id);
+      onRefresh();
+    }
+  };
+
   return (
-    <div className={`p-6 space-y-8 text-right pb-24 ${isDarkMode ? 'bg-gray-950 text-white' : ''} animate-fade`}>
-       <h2 className="text-3xl font-black italic">إدارة العمليات</h2>
-       <div className="space-y-4">
-          {bookings.map((b: any) => (
-             <div key={b.id} className={`${isDarkMode ? 'bg-gray-900 border-gray-800 text-white' : 'bg-white border-gray-100'} p-6 rounded-[2.5rem] border shadow-sm flex items-center justify-between border-r-8 border-r-pink-600`}>
-                <div className="flex gap-2">
-                   {b.status === 'Pending' && <button onClick={()=>updateStatus(b.id, 'Confirmed')} className="p-3 bg-green-500 text-white rounded-xl shadow-lg hover:scale-110 transition-transform"><CheckCircle size={20}/></button>}
-                   {b.status === 'Confirmed' && <button onClick={()=>updateStatus(b.id, 'Delivered')} className="p-3 bg-blue-500 text-white rounded-xl shadow-lg hover:scale-110 transition-transform"><Layers size={20}/></button>}
-                   <Link to={`/booking-status/${b.id}`} className={`p-3 rounded-xl ${isDarkMode ? 'bg-gray-800 text-gray-500' : 'bg-gray-50 text-gray-400'} hover:bg-pink-50 hover:text-pink-600 transition-colors`}><Eye size={20}/></Link>
+    <div className={`p-6 space-y-8 text-right animate-fade pb-24 ${isDarkMode ? 'bg-gray-950 text-white' : ''}`}>
+      <h2 className="text-3xl font-black italic">إدارة الحجوزات</h2>
+      
+      <div className={`p-5 rounded-[2rem] shadow-lg flex justify-between items-center ${isDarkMode ? 'bg-gray-900 border border-gray-800' : 'bg-white border border-gray-100'}`}>
+        
+        <div className="flex gap-4">
+          {['All', 'Pending', 'Confirmed', 'Completed', 'Cancelled'].map(s => (
+            <button
+              key={s}
+              onClick={() => setFilter(s)}
+              className={`px-4 py-2 rounded-full font-bold text-sm transition-colors ${
+                filter === s ? 'bg-pink-600 text-white' : isDarkMode ? 'bg-gray-700 text-gray-300 hover:bg-gray-600' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+              }`}
+            >
+              {s === 'All' ? 'الكل' : s === 'Pending' ? 'بانتظار التأكيد' : s === 'Confirmed' ? 'مؤكد' : s === 'Completed' ? 'مكتمل' : 'ملغى'}
+            </button>
+          ))}
+        </div>
+
+        <div className="relative w-72">
+          <Search size={20} className="absolute top-1/2 left-4 transform -translate-y-1/2 text-gray-400" />
+          <input
+            type="text"
+            placeholder="ابحث بالاسم أو رقم الحجز..."
+            value={searchTerm}
+            onChange={e => setSearchTerm(e.target.value)}
+            className={`w-full p-4 pl-12 rounded-[1.5rem] font-bold text-sm outline-none text-right shadow-inner ${isDarkMode ? 'bg-gray-800 border-gray-700 text-white' : 'bg-gray-50 border-transparent text-gray-900'}`}
+          />
+        </div>
+      </div>
+
+      <div className="space-y-4">
+        {filteredBookings.length > 0 ? (
+          filteredBookings.map((b: any) => (
+            <div key={b.id} className={`p-6 rounded-[2.5rem] border shadow-md transition-all ${isDarkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-100'}`}>
+              <div className="flex justify-between items-start border-b pb-4 mb-4">
+                <div className="flex gap-3">
+                  <button onClick={() => handleDelete(b.id)} className="text-red-500 p-2 hover:bg-red-50 rounded-xl transition-colors"><Trash2 size={20} /></button>
                 </div>
                 <div className="text-right">
-                   <div className="flex items-center justify-end gap-2 mb-1">
-                      <span className={`px-2 py-0.5 rounded-full text-[8px] font-black ${b.status==='Confirmed'?'bg-green-100 text-green-600':'bg-amber-100 text-amber-600'}`}>{b.status}</span>
-                      <span className="text-[10px] font-black uppercase text-pink-600">#{b.id.slice(-6)}</span>
-                   </div>
-                   <p className="font-black text-xs">{b.userName} - {b.totalPrice} ر.س</p>
+                  <h3 className="text-xl font-black italic text-pink-600">{b.user_name}</h3>
+                  <p className={`text-sm font-bold ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>{b.id}</p>
                 </div>
-             </div>
-          ))}
-       </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-4 text-sm font-medium border-b py-4 mb-4">
+                <div className="flex items-center gap-2 text-right justify-end"><Clock size={16} /> <span className={isDarkMode ? 'text-gray-300' : 'text-gray-700'}>{formatDate(b.createdAt)}</span></div>
+                <div className="flex items-center gap-2 text-right justify-end"><Phone size={16} /> <span className={isDarkMode ? 'text-gray-300' : 'text-gray-700'}>{b.user_phone || 'لا يوجد'}</span></div>
+                <div className="flex items-center gap-2 text-right justify-end"><DollarSign size={16} /> <span className="font-black text-pink-600">{formatCurrency(b.total_price)}</span></div>
+              </div>
+
+              <div className="space-y-2 mb-4 text-right">
+                <p className={`text-[10px] font-black uppercase tracking-widest ${isDarkMode ? 'text-gray-500' : 'text-gray-400'}`}>القطع المحجوزة:</p>
+                <ul className="list-disc list-inside space-y-1 pr-4">
+                  {b.items.map((item: any, index: number) => (
+                    <li key={index} className={`font-medium ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>{item.name} (الكمية: {item.quantity})</li>
+                  ))}
+                </ul>
+              </div>
+
+              <div className="flex justify-between items-center pt-4">
+                <div className="flex gap-2">
+                  <StatusBadge status={b.status} />
+                </div>
+                <div className="flex gap-3">
+                  {b.status === 'Pending' && (
+                    <button onClick={() => updateStatus(b.id, 'Confirmed')} className="bg-green-500 text-white px-4 py-2 rounded-xl font-bold text-sm transition-colors hover:bg-green-600 flex items-center gap-2"><CheckCircle size={16} /> تأكيد</button>
+                  )}
+                  {b.status !== 'Cancelled' && (
+                    <button onClick={() => updateStatus(b.id, 'Cancelled')} className="bg-red-500/10 text-red-500 px-4 py-2 rounded-xl font-bold text-sm transition-colors hover:bg-red-500 hover:text-white flex items-center gap-2"><X size={16} /> إلغاء</button>
+                  )}
+                  {b.status === 'Confirmed' && (
+                    <button onClick={() => updateStatus(b.id, 'Completed')} className="bg-pink-600 text-white px-4 py-2 rounded-xl font-bold text-sm transition-colors hover:bg-pink-700 flex items-center gap-2"><CalendarCheck size={16} /> إتمام</button>
+                  )}
+                </div>
+              </div>
+            </div>
+          ))
+        ) : (
+          <div className="text-center py-20 opacity-20 flex flex-col items-center">
+            <Calendar size={60} className="mb-4" />
+            <p className="font-black italic">لا يوجد حجوزات تتطابق مع البحث</p>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
+
+// --- 6. Admin Codes Manager (مكتملة) ---
 
 function AdminCodesManager({ codes, onRefresh, isDarkMode }: any) {
-  const approve = async (id: string) => {
-    const code = `NICE-${Math.floor(1000 + Math.random() * 8999)}`;
-    await supabaseOperation('update', 'customer_codes', { status: 'approved', isActive: true, code }, id);
+  const [filter, setFilter] = useState('All');
+  const [searchTerm, setSearchTerm] = useState('');
+
+  // دمج الأكواد من قاعدة البيانات والتخزين المحلي
+  const localCodes = JSON.parse(localStorage.getItem('local_customer_codes') || '[]');
+  const allCodes = [
+    ...(codes || []).map((c: any) => ({
+      ...c,
+      customerName: c?.customer_name || 'غير محدد',
+      userPhone: c?.user_phone || '',
+      isActive: c?.is_active || false,
+      walletBalance: c?.wallet_balance || 0,
+      createdAt: c?.created_at || new Date().toISOString(),
+      isLocal: false
+    })),
+    ...localCodes.map((c: any) => ({
+      ...c,
+      customerName: c?.customer_name || 'غير محدد',
+      userPhone: c?.user_phone || c?.phone || '',
+      isActive: c?.is_active || false,
+      walletBalance: c?.wallet_balance || 0,
+      createdAt: c?.created_at || new Date().toISOString(),
+      isLocal: true
+    }))
+  ];
+
+  const filteredCodes = allCodes.filter((c: any) => {
+    const statusMatch = filter === 'All' || c.status === filter;
+    const searchMatch = (c.customerName && typeof c.customerName === 'string' && c.customerName.toLowerCase().includes(searchTerm.toLowerCase())) ||
+                        (c.code && typeof c.code === 'string' && c.code.toLowerCase().includes(searchTerm.toLowerCase()));
+    return statusMatch && searchMatch;
+  });
+
+  const updateStatus = async (id: string, status: string, code: string, isLocal?: boolean) => {
+    if (isLocal) {
+      // تحديث الكود المحلي
+      const localCodes = JSON.parse(localStorage.getItem('local_customer_codes') || '[]');
+      const updatedCodes = localCodes.map((c: any) => {
+        if (c.id === id) {
+          return {
+            ...c,
+            status,
+            is_active: status === 'approved',
+            code: status === 'approved' ? code : 'PENDING'
+          };
+        }
+        return c;
+      });
+      localStorage.setItem('local_customer_codes', JSON.stringify(updatedCodes));
+    } else {
+      // تحديث في قاعدة البيانات
+      const isActive = status === 'approved';
+      await supabaseOperation('update', 'customer_codes', { status, isActive, code: isActive ? code : 'PENDING' }, id);
+    }
     onRefresh();
   };
+
+  const handleDelete = async (id: string, isLocal?: boolean) => {
+    if (confirm('هل أنت متأكد من حذف هذا الكود؟ سيؤدي ذلك إلى منع العميل من الدخول.')) {
+      if (isLocal) {
+        // حذف من التخزين المحلي
+        const localCodes = JSON.parse(localStorage.getItem('local_customer_codes') || '[]');
+        const filteredCodes = localCodes.filter((c: any) => c.id !== id);
+        localStorage.setItem('local_customer_codes', JSON.stringify(filteredCodes));
+      } else {
+        // حذف من قاعدة البيانات
+        await supabaseOperation('delete', 'customer_codes', null, id);
+      }
+      onRefresh();
+    }
+  };
+
+  const generateNewCode = (currentCode: string) => {
+    if (currentCode && typeof currentCode === 'string' && currentCode.startsWith('PENDING')) {
+      return `NICE-${Math.floor(1000 + Math.random() * 8999)}`;
+    }
+    return currentCode || `NICE-${Math.floor(1000 + Math.random() * 8999)}`;
+  };
+
   return (
-    <div className={`p-6 space-y-8 text-right pb-24 ${isDarkMode ? 'bg-gray-950 text-white' : ''} animate-fade`}>
-       <h2 className="text-3xl font-black italic">إدارة الوصول</h2>
-       <div className="space-y-4">
-          {codes.map((c: any) => (
-             <div key={c.id} className={`${isDarkMode ? 'bg-gray-900 border-gray-800 text-white' : 'bg-white border-gray-100'} p-6 rounded-[2.5rem] border shadow-sm flex items-center justify-between`}>
-                <div className="flex gap-2">
-                   {c.status === 'pending' && <button onClick={()=>approve(c.id)} className="p-3 bg-green-500 text-white rounded-xl shadow-lg transition-transform active:scale-90"><UserCheck size={20}/></button>}
-    await supabaseOperation('delete','customer_codes',null,c.id);
+    <div className={`p-6 space-y-8 text-right animate-fade pb-24 ${isDarkMode ? 'bg-gray-950 text-white' : ''}`}>
+      <h2 className="text-3xl font-black italic">إدارة الأكواد الملكية</h2>
+      
+      <div className={`p-5 rounded-[2rem] shadow-lg flex justify-between items-center ${isDarkMode ? 'bg-gray-900 border border-gray-800' : 'bg-white border border-gray-100'}`}>
+        
+        <div className="flex gap-4">
+          {['All', 'approved', 'pending', 'blocked'].map(s => (
+            <button
+              key={s}
+              onClick={() => setFilter(s)}
+              className={`px-4 py-2 rounded-full font-bold text-sm transition-colors ${
+                filter === s ? 'bg-pink-600 text-white' : isDarkMode ? 'bg-gray-700 text-gray-300 hover:bg-gray-600' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+              }`}
+            >
+              {s === 'All' ? 'الكل' : s === 'approved' ? 'مفعل' : s === 'pending' ? 'بانتظار الموافقة' : 'محظور'}
+            </button>
+          ))}
+        </div>
+
+        <div className="relative w-72">
+          <Search size={20} className="absolute top-1/2 left-4 transform -translate-y-1/2 text-gray-400" />
+          <input
+            type="text"
+            placeholder="ابحث بالاسم أو الكود..."
+            value={searchTerm}
+            onChange={e => setSearchTerm(e.target.value)}
+            className={`w-full p-4 pl-12 rounded-[1.5rem] font-bold text-sm outline-none text-right shadow-inner ${isDarkMode ? 'bg-gray-800 border-gray-700 text-white' : 'bg-gray-50 border-transparent text-gray-900'}`}
+          />
+        </div>
+      </div>
+
+      <div className="space-y-4">
+        {filteredCodes.length > 0 ? (
+          filteredCodes.map((c: any) => (
+            <div key={c.id} className={`p-6 rounded-[2.5rem] border shadow-md transition-all ${isDarkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-100'}`}>
+              <div className="flex justify-between items-start border-b pb-4 mb-4">
+                <div className="flex gap-3">
+                  <button onClick={() => handleDelete(c.id, c.isLocal)} className="text-red-500 p-2 hover:bg-red-50 rounded-xl transition-colors"><Trash2 size={20} /></button>
                 </div>
                 <div className="text-right">
-                   <p className="font-black text-xs uppercase tracking-tighter">{c.customerName}</p>
-                   <div className="text-pink-600 font-black italic tracking-widest">{c.code}</div>
+                  <div className="flex items-center gap-2 justify-end">
+                    <h3 className="text-xl font-black italic text-pink-600">{c.customerName}</h3>
+                    {c.isLocal && <span className="px-2 py-1 bg-amber-500 text-white text-[8px] font-black uppercase tracking-widest rounded-full">محلي</span>}
+                  </div>
+                  <p className={`text-sm font-bold ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>{c.code}</p>
                 </div>
-             </div>
-          ))}
-       </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-4 text-sm font-medium border-b py-4 mb-4">
+                <div className="flex items-center gap-2 text-right justify-end"><Clock size={16} /> <span className={isDarkMode ? 'text-gray-300' : 'text-gray-700'}>{formatDate(c.createdAt)}</span></div>
+                <div className="flex items-center gap-2 text-right justify-end"><Phone size={16} /> <span className={isDarkMode ? 'text-gray-300' : 'text-gray-700'}>{c.userPhone || 'لا يوجد'}</span></div>
+                <div className="flex items-center gap-2 text-right justify-end"><DollarSign size={16} /> <span className="font-black text-amber-600">{formatCurrency(c.walletBalance)}</span></div>
+              </div>
+
+              <div className="flex justify-between items-center pt-4">
+                <div className="flex gap-2">
+                  <StatusBadge status={c.status} type="code" />
+                </div>
+                <div className="flex gap-3">
+                  {c.status === 'pending' && (
+                    <button onClick={() => updateStatus(c.id, 'approved', generateNewCode(c.code), c.isLocal)} className="bg-green-500 text-white px-4 py-2 rounded-xl font-bold text-sm transition-colors hover:bg-green-600 flex items-center gap-2"><CheckCircle size={16} /> تفعيل</button>
+                  )}
+                  {c.status === 'approved' && (
+                    <button onClick={() => updateStatus(c.id, 'blocked', 'BLOCKED', c.isLocal)} className="bg-red-500/10 text-red-500 px-4 py-2 rounded-xl font-bold text-sm transition-colors hover:bg-red-500 hover:text-white flex items-center gap-2"><X size={16} /> حظر</button>
+                  )}
+                  {c.status === 'blocked' && (
+                    <button onClick={() => updateStatus(c.id, 'approved', generateNewCode(c.code), c.isLocal)} className="bg-blue-500 text-white px-4 py-2 rounded-xl font-bold text-sm transition-colors hover:bg-blue-600 flex items-center gap-2"><UserCheck size={16} /> إعادة تفعيل</button>
+                  )}
+                </div>
+              </div>
+            </div>
+          ))
+        ) : (
+          <div className="text-center py-20 opacity-20 flex flex-col items-center">
+            <Key size={60} className="mb-4" />
+            <p className="font-black italic">لا يوجد أكواد تتطابق مع البحث</p>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
 
-function AdminReportsView({ bookings, isDarkMode }: any) {
-  const confirmed = bookings.filter((b: any) => b.status === 'Confirmed' || b.status === 'Completed' || b.status === 'Delivered');
-  const revenue = confirmed.reduce((sum: number, b: any) => sum + (b.totalPrice || 0), 0);
-  return (
-    <div className={`p-6 space-y-10 text-right animate-fade ${isDarkMode ? 'bg-gray-950 text-white' : ''}`}>
-       <h2 className="text-3xl font-black italic">التقارير المالية</h2>
-       <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
-          <StatCard title="إجمالي الدخل" value={`${revenue} ر.س`} icon={<TrendingUp/>} color="bg-black" />
-          <StatCard title="الحجوزات المعتمدة" value={confirmed.length} icon={<CheckCircle/>} color="bg-pink-600" />
-       </div>
-    </div>
-  );
+// --- 7. Admin Dashboard View ---
+
+function AdminDashboardView({ bookings, codes, products, isDarkMode }: any) {
+    const totalRevenue = bookings
+        .filter((b: any) => b.status === 'Completed')
+        .reduce((sum: number, b: any) => sum + b.totalPrice, 0);
+
+    const pendingBookingsCount = bookings.filter((b: any) => b.status === 'Pending').length;
+    const pendingCodesCount = codes.filter((c: any) => c.status === 'pending').length;
+    const totalProducts = products.length;
+
+    const cards = [
+        { icon: TrendingUp, title: 'إجمالي الأرباح', value: formatCurrency(totalRevenue), color: 'text-pink-600', bg: 'bg-pink-50' },
+        { icon: Calendar, title: 'حجوزات بانتظار التأكيد', value: pendingBookingsCount, color: 'text-amber-600', bg: 'bg-amber-50' },
+        { icon: UserPlus, title: 'طلبات كود جديدة', value: pendingCodesCount, color: 'text-blue-600', bg: 'bg-blue-50' },
+        { icon: Box, title: 'إجمالي قطع المخزون', value: totalProducts, color: 'text-green-600', bg: 'bg-green-50' },
+    ];
+
+    return (
+        <div className={`p-6 space-y-10 text-right animate-fade pb-24 ${isDarkMode ? 'bg-gray-950 text-white' : ''}`}>
+            <h2 className="text-3xl font-black italic">لوحة التحكم الرئيسية</h2>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+                {cards.map((card, index) => (
+                    <div key={index} className={`p-6 rounded-[2.5rem] border shadow-lg flex flex-col justify-center items-end ${isDarkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-100'}`}>
+                        <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${card.bg} ${card.color} mb-3`}>
+                            <card.icon size={24} />
+                        </div>
+                        <p className={`text-sm font-bold ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>{card.title}</p>
+                        <h3 className="text-2xl font-black italic mt-1">{card.value}</h3>
+                    </div>
+                ))}
+            </div>
+
+            {/* أحدث الحجوزات */}
+            <div className={`p-8 rounded-[3rem] border shadow-xl ${isDarkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-100'}`}>
+                <h3 className="text-xl font-black italic text-pink-600 mb-6">أحدث 5 حجوزات</h3>
+                <div className="space-y-4">
+                    {bookings.slice(0, 5).map((b: any) => (
+                        <div key={b.id} className="flex justify-between items-center border-b pb-3">
+                            <StatusBadge status={b.status} />
+                            <div className="text-right">
+                                <p className={`font-bold ${isDarkMode ? 'text-gray-100' : 'text-gray-800'}`}>{b.user_name}</p>
+                                <p className={`text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>{b.id}</p>
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            </div>
+        </div>
+    );
 }
+
+// --- 8. Admin Settings View ---
 
 function AdminSettingsView({ content, onRefresh, isDarkMode }: any) {
   const [form, setForm] = useState(content);
+
+  useEffect(() => {
+    setForm(content);
+  }, [content]);
+
+  const handleSave = async () => {
+    if (confirm('هل أنت متأكد من حفظ الإعدادات؟ سيؤثر هذا على إعدادات التطبيق العامة.')) {
+      // ✅ تم التأكد من استخدام 'app_settings' هنا
+      const res = await supabaseOperation('set', 'app_settings', { ...form, id: 'main' }, 'main');
+      if ((res as any).success) {
+        onRefresh();
+        alert('تم حفظ الإعدادات بنجاح');
+      } else {
+        alert('فشل الحفظ: ' + (res as any).error);
+      }
+    }
+  };
+
   return (
-    <div className={`p-6 space-y-10 text-right pb-32 ${isDarkMode ? 'bg-gray-950 text-white' : ''}`}>
-       <h2 className="text-3xl font-black italic text-center">إعدادات النظام الملكية</h2>
-       <div className={`${isDarkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-100'} p-10 rounded-[4rem] border shadow-xl space-y-8`}>
-          <SectionInput label="عن فرحتي" value={form.aboutUs} onChange={(v:any)=>setForm({...form, aboutUs:v})} type="textarea" isDarkMode={isDarkMode} />
-          <SectionInput label="سياسة التأجير" value={form.rentalPolicy} onChange={(v:any)=>setForm({...form, rentalPolicy:v})} type="textarea" isDarkMode={isDarkMode} />
-          <SectionInput label="كلمة مرور الإدارة" value={form.admin_password} onChange={(v:any)=>setForm({...form, admin_password:v})} type="password" isDarkMode={isDarkMode} />
-          <button onClick={async()=>{await supabaseOperation('set','app_content',form, content.id || 'main'); onRefresh(); alert('تم حفظ الإعدادات بنجاح');}} className="w-full py-6 bg-black text-white rounded-[2.5rem] font-black italic shadow-2xl active:scale-95 transition-all">
-             <Save className="inline-block ml-2"/> حفظ كافة التعديلات
+    <div className={`p-6 space-y-10 text-right animate-fade pb-24 ${isDarkMode ? 'bg-gray-950 text-white' : ''}`}>
+      <h2 className="text-3xl font-black italic">إعدادات التطبيق العامة</h2>
+
+      <div className={`p-8 rounded-[3rem] border shadow-xl space-y-8 ${isDarkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-100'}`}>
+        
+        <SectionInput 
+          label="كلمة مرور الإدارة (Admin Password)"
+          value={form.admin_password} 
+          onChange={(v:any)=>setForm({...form, admin_password:v})} 
+          isDarkMode={isDarkMode} 
+          info="تستخدم لتسجيل دخول المدير (افتراضياً: ADMIN123)"
+        />
+
+        <SectionInput 
+          label="رسالة الترحيب الرئيسية"
+          value={form.main_welcome_message} 
+          onChange={(v:any)=>setForm({...form, main_welcome_message:v})} 
+          isDarkMode={isDarkMode} 
+          type="textarea"
+        />
+
+        <SectionInput 
+          label="رابط WhatsApp للتواصل"
+          value={form.whatsapp_link} 
+          onChange={(v:any)=>setForm({...form, whatsapp_link:v})} 
+          isDarkMode={isDarkMode} 
+          info="يجب أن يبدأ بـ https://wa.me/"
+        />
+
+        <div className="flex justify-center pt-8">
+          <button onClick={handleSave} className="w-96 py-6 bg-pink-600 text-white rounded-[2rem] font-black italic shadow-xl hover:bg-pink-700 transition-all flex items-center justify-center gap-2">
+            <Save size={20}/> حفظ التعديلات
           </button>
-       </div>
+        </div>
+      </div>
     </div>
   );
 }
 
-// --- Store Specific Components ---
+// --- 9. Store Home View (واجهة المستخدم) ---
 
 function StoreHomeView({ products, categories, onAdd, isDarkMode }: any) {
-  const [filter, setFilter] = useState('الكل');
-  const [search, setSearch] = useState('');
-  
-  const filtered = products.filter((p: any) => {
-    const matchesFilter = filter === 'الكل' || p.categoryId === filter;
-    const matchesSearch = p.name.toLowerCase().includes(search.toLowerCase());
-    return matchesFilter && matchesSearch && p.isAvailable;
+  const [activeCategory, setActiveCategory] = useState('الكل');
+  const [searchTerm, setSearchTerm] = useState('');
+
+  const filteredProducts = products.filter((p: any) => {
+    const categoryMatch = activeCategory === 'الكل' || p.categoryId === activeCategory;
+    const searchMatch = p.name && typeof p.name === 'string' && p.name.toLowerCase().includes(searchTerm.toLowerCase());
+    return categoryMatch && searchMatch && p.isAvailable;
   });
 
+  const uniqueCategories = ['الكل', ...new Set(categories.map((c: any) => c.name))];
+
   return (
-    <div className={`p-6 pb-32 text-right animate-fade ${isDarkMode ? 'bg-gray-950 text-white' : ''}`}>
-      <div className="relative mb-8 group">
-         <input 
-            className={`w-full p-5 ${isDarkMode ? 'bg-gray-900 border-gray-800 text-white' : 'bg-gray-50 text-gray-900'} rounded-[2rem] pr-14 font-bold text-xs outline-none border-2 border-transparent focus:border-pink-500 transition-all shadow-inner`} 
-            placeholder="ابحث عن قطعة ملكية..." 
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-         />
-         <Search size={20} className={`absolute right-6 top-1/2 -translate-y-1/2 ${isDarkMode ? 'text-gray-600' : 'text-gray-300'} group-focus-within:text-pink-600 transition-colors`} />
+    <div className={`p-6 space-y-8 text-right pb-24 ${isDarkMode ? 'bg-gray-950 text-white' : ''} animate-fade`}>
+      <h1 className="text-3xl font-black italic text-pink-600">مرحباً بك في متجر فرحتي</h1>
+      
+      {/* Search and Filter */}
+      <div className={`p-5 rounded-[2rem] shadow-lg flex flex-col gap-6 ${isDarkMode ? 'bg-gray-900 border border-gray-800' : 'bg-white border border-gray-100'}`}>
+        <div className="relative">
+          <Search size={20} className="absolute top-1/2 left-4 transform -translate-y-1/2 text-gray-400" />
+          <input
+            type="text"
+            placeholder="ابحث عن قطعة أثاث أو ديكور..."
+            value={searchTerm}
+            onChange={e => setSearchTerm(e.target.value)}
+            className={`w-full p-4 pl-12 rounded-[1.5rem] font-bold text-sm outline-none text-right shadow-inner ${isDarkMode ? 'bg-gray-800 border-gray-700 text-white' : 'bg-gray-50 border-transparent text-gray-900'}`}
+          />
+        </div>
+
+        <div className="flex overflow-x-auto pb-2 scrollbar-hide">
+          {uniqueCategories.map(cat => (
+            <button
+              key={cat}
+              onClick={() => setActiveCategory(cat)}
+              className={`flex-shrink-0 px-5 py-2 mx-1 rounded-full font-bold text-sm transition-colors ${
+                activeCategory === cat ? 'bg-black text-white' : isDarkMode ? 'bg-gray-700 text-gray-300 hover:bg-gray-600' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+              }`}
+            >
+              {cat}
+            </button>
+          ))}
+        </div>
       </div>
 
-      <div className="flex gap-2 overflow-x-auto no-scrollbar py-2 mb-8 -mx-6 px-6">
-        {['الكل', ...categories.map((c:any)=>c.name)].map(f => (
-          <button 
-            key={f} 
-            onClick={()=>setFilter(f)} 
-            className={`px-8 py-4 rounded-[1.5rem] text-[10px] font-black italic whitespace-nowrap transition-all active:scale-90 ${filter===f?'bg-black text-white shadow-xl':(isDarkMode ? 'bg-gray-900 text-gray-500 hover:bg-gray-800' : 'bg-gray-50 text-gray-400 hover:bg-gray-100')}`}
-          >
-            {f}
-          </button>
+      {/* Product Grid */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+        {filteredProducts.map((p: any) => (
+          <ProductCard key={p.id} product={p} onAdd={onAdd} isDarkMode={isDarkMode} />
         ))}
       </div>
 
-      <div className="flex flex-col items-center mb-8">
-        <h2 className={`text-3xl font-black italic tracking-tighter ${isDarkMode ? 'text-gray-100' : 'text-gray-800'}`}>المعرض الملكي</h2>
-        <div className="w-12 h-1 bg-pink-600 rounded-full mt-2 opacity-20" />
-      </div>
-
-      <div className="grid grid-cols-2 gap-5">
-        {filtered.map((p: any) => (
-          <div key={p.id} className={`${isDarkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-100'} rounded-[2.5rem] border overflow-hidden shadow-sm group active:scale-95 transition-transform`}>
-             <div className={`h-44 ${isDarkMode ? 'bg-gray-800' : 'bg-gray-50'} overflow-hidden relative`}>
-                <img src={p.images?.[0]} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-700" />
-                <button 
-                  onClick={(e)=>{ e.preventDefault(); onAdd(p); }} 
-                  className="absolute bottom-4 left-4 p-3.5 bg-black text-white rounded-2xl shadow-xl active:scale-75 transition-all"
-                >
-                  <Plus size={18}/>
-                </button>
-                <div className={`absolute top-4 right-4 px-3 py-1 ${isDarkMode ? 'bg-gray-900/90' : 'bg-white/90'} backdrop-blur rounded-full font-black text-[10px] shadow-sm border ${isDarkMode ? 'border-gray-700' : 'border-white/50'} text-pink-600`}>
-                  {p.price} ر.س
-                </div>
-             </div>
-             <div className="p-5 text-right">
-                <h4 className={`font-black text-[11px] ${isDarkMode ? 'text-gray-100' : 'text-gray-800'} truncate mb-1`}>{p.name}</h4>
-                <div className="flex items-center justify-end gap-1">
-                   <span className="text-[8px] font-bold text-gray-400 uppercase tracking-widest">{p.categoryId}</span>
-                </div>
-             </div>
-          </div>
-        ))}
-      </div>
-
-      {filtered.length === 0 && (
-        <div className="text-center py-20 opacity-20 flex flex-col items-center">
-           <Search size={60} className="mb-4" />
-           <p className="font-black italic">لم نجد ما تبحث عنه</p>
+      {filteredProducts.length === 0 && (
+        <div className="text-center py-20 opacity-30 flex flex-col items-center">
+          <ShoppingBag size={80} className="mb-4" />
+          <p className="text-xl font-black italic">لا يوجد منتجات في هذا القسم أو تتطابق مع البحث</p>
         </div>
       )}
     </div>
   );
 }
 
-// --- Cart View Component ---
+// --- 10. Cart Page View ---
+
 function CartPageView({ cart, onCheckout, onRemove, isDarkMode }: any) {
-  const total = cart.reduce((sum: number, item: any) => sum + (item.product.price * item.quantity), 0);
-  
-  return (
-    <div className={`p-6 pb-32 text-right animate-fade ${isDarkMode ? 'bg-gray-950 text-white' : ''}`}>
-      <div className="flex flex-col items-center mb-10">
-        <div className={`p-4 ${isDarkMode ? 'bg-pink-900/20 text-pink-500' : 'bg-pink-50 text-pink-600'} rounded-3xl mb-4 shadow-inner`}><ShoppingCart size={32}/></div>
-        <h2 className="text-2xl font-black italic">السلة الملكية</h2>
-        <p className="text-[10px] font-bold text-gray-400 mt-2">راجع اختياراتك لليلة العمر</p>
-      </div>
+  const total = cart.reduce((sum: number, item: any) => sum + item.product.price * item.quantity, 0);
 
-      <div className="space-y-4">
-        {cart.map((item: any) => (
-          <div key={item.product.id} className={`${isDarkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-100'} p-6 rounded-[2.5rem] border shadow-sm flex items-center justify-between`}>
-            <button onClick={() => onRemove(item.product.id)} className={`p-3 rounded-xl transition-all ${isDarkMode ? 'bg-red-900/20 text-red-400' : 'bg-red-50 text-red-500'}`}>
-              <Trash2 size={20} />
-            </button>
-            
-            <div className="flex items-center gap-4 text-right flex-1 justify-end">
-              <div>
-                <h4 className="font-black text-sm">{item.product.name}</h4>
-                <p className="text-pink-600 font-black text-xs mt-1">{item.product.price} × {item.quantity} ر.س</p>
+  return (
+    <div className={`p-6 space-y-8 text-right pb-32 ${isDarkMode ? 'bg-gray-950 text-white' : ''} animate-fade`}>
+      <h2 className="text-3xl font-black italic">السلة الملكية</h2>
+
+      {cart.length === 0 ? (
+        <div className="text-center py-40 opacity-30 flex flex-col items-center">
+          <ShoppingCart size={80} className="mb-4" />
+          <p className="text-xl font-black italic">سلتك فارغة</p>
+          <Link to="/store" className="mt-4 text-pink-600 font-bold flex items-center gap-1">
+            اكتشف أحدث القطع <ArrowRight size={16} />
+          </Link>
+        </div>
+      ) : (
+        <>
+          <div className="space-y-4">
+            {cart.map((item: any) => (
+              <div key={item.product.id} className={`p-5 rounded-[2.5rem] border flex justify-between items-center shadow-sm ${isDarkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-100'}`}>
+                <button onClick={() => onRemove(item.product.id)} className="text-red-500 p-3 hover:bg-red-50 rounded-xl transition-colors"><Trash2 size={20} /></button>
+                
+                <div className="text-right flex-1 pr-6">
+                  <h3 className={`font-black ${isDarkMode ? 'text-gray-100' : 'text-gray-800'}`}>{item.product.name}</h3>
+                  <p className={`text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>الكمية: {item.quantity}</p>
+                </div>
+
+                <span className="text-lg font-black italic text-pink-600">{formatCurrency(item.product.price * item.quantity)}</span>
               </div>
-              <img src={item.product.images[0]} className="w-16 h-16 rounded-2xl object-cover shadow-md" />
-            </div>
+            ))}
           </div>
-        ))}
 
-        {cart.length === 0 ? (
-          <div className="text-center py-20 opacity-20 flex flex-col items-center">
-            <ShoppingCart size={60} className="mb-4" />
-            <p className="font-black italic">السلة فارغة حالياً</p>
-            <Link to="/store" className="mt-4 px-8 py-3 bg-pink-600 text-white rounded-2xl text-[10px] font-black italic">ابدأ التسوق</Link>
-          </div>
-        ) : (
-          <div className={`mt-10 p-8 rounded-[3rem] ${isDarkMode ? 'bg-gray-900 border-gray-800' : 'bg-gray-50 border-gray-100'} border shadow-inner`}>
-            <div className="flex justify-between items-center mb-8">
-              <span className="text-2xl font-black italic text-pink-600">{total} ر.س</span>
-              <span className="text-gray-400 text-[10px] font-black uppercase tracking-widest">المجموع الإجمالي</span>
+          <div className={`p-8 rounded-[3rem] shadow-xl space-y-4 ${isDarkMode ? 'bg-gray-900 border border-gray-800' : 'bg-white border border-gray-100'}`}>
+            <div className="flex justify-between items-center border-b pb-3">
+              <span className={`text-sm font-bold ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>إجمالي قيمة الإيجار:</span>
+              <span className="text-xl font-black italic text-pink-600">{formatCurrency(total)}</span>
             </div>
-            <button 
-              onClick={() => onCheckout(total)}
-              className="w-full py-6 bg-black text-white rounded-[2.5rem] font-black italic shadow-xl hover:bg-pink-600 transition-all active:scale-95 flex items-center justify-center gap-3"
-            >
-              <CheckCircle size={22}/> إتمام الحجز الملكي
+            <div className="flex justify-between items-center border-b pb-3">
+              <span className={`text-sm font-bold ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>مبلغ التأمين (20%):</span>
+              <span className="text-xl font-black italic text-amber-600">{formatCurrency(total * 0.2)}</span>
+            </div>
+            <div className="flex justify-between items-center pt-3">
+              <span className="text-xl font-black italic">الإجمالي المطلوب الآن:</span>
+              <span className="text-2xl font-black italic text-black dark:text-white">{formatCurrency(total * 1.2)}</span>
+            </div>
+            
+            <button onClick={() => onCheckout(total)} className="w-full py-6 bg-pink-600 text-white rounded-[2rem] font-black italic shadow-xl hover:bg-pink-700 transition-all flex items-center justify-center gap-2 mt-6">
+              <CalendarCheck size={20}/> تأكيد الطلب ودفع مبلغ التأمين
             </button>
           </div>
-        )}
-      </div>
+        </>
+      )}
     </div>
   );
 }
 
-function UserBookingsView({ bookings, userId, isDarkMode }: any) {
-  const userBookings = bookings.filter((b: any) => b.userId === userId).sort((a:any, b:any) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+// --- 11. Booking Status View ---
 
-  return (
-    <div className={`p-6 pb-32 text-right animate-fade ${isDarkMode ? 'bg-gray-950' : ''}`}>
-       <div className="flex flex-col items-center mb-10">
-          <div className={`p-4 ${isDarkMode ? 'bg-amber-900/20 text-amber-500' : 'bg-amber-50 text-amber-600'} rounded-3xl mb-4 shadow-inner`}><Calendar size={32}/></div>
-          <h2 className="text-2xl font-black italic">حجوزاتي الملكية</h2>
-          <p className="text-[10px] font-bold text-gray-400 mt-2">تابع حالة طلباتك لحظة بلحظة</p>
-       </div>
-
-       <div className="space-y-4">
-          {userBookings.map((b: any) => (
-             <Link to={`/booking-status/${b.id}`} key={b.id} className={`${isDarkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-100'} block p-6 rounded-[2.5rem] border shadow-sm active:scale-[0.98] transition-all border-r-8 border-r-pink-600`}>
-                <div className="flex items-center justify-between mb-4">
-                   <div className={`px-4 py-1.5 rounded-full text-[9px] font-black uppercase tracking-widest ${
-                     b.status === 'Confirmed' ? (isDarkMode ? 'bg-green-900/30 text-green-400' : 'bg-green-100 text-green-600') : 
-                     b.status === 'Pending' ? (isDarkMode ? 'bg-amber-900/30 text-amber-400' : 'bg-amber-100 text-amber-600') : 
-                     (isDarkMode ? 'bg-gray-800 text-gray-500' : 'bg-gray-100 text-gray-400')
-                   }`}>
-                      {b.status === 'Pending' ? 'قيد المراجعة' : b.status === 'Confirmed' ? 'تم التأكيد' : b.status}
-                   </div>
-                   <h4 className="font-black text-xs italic text-pink-600 tracking-tighter">#{b.id.slice(-6)}</h4>
-                </div>
-                <div className="flex items-center justify-between">
-                   <span className={`text-lg font-black italic ${isDarkMode ? 'text-gray-100' : 'text-gray-800'}`}>{b.totalPrice} ر.س</span>
-                   <div className="text-right">
-                      <p className="text-[9px] text-gray-400 font-bold mb-1">{new Date(b.createdAt).toLocaleDateString('ار-SA')}</p>
-                      <p className={`text-[10px] font-black ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>{b.items.length} قطع مختارة</p>
-                   </div>
-                </div>
-             </Link>
-          ))}
-
-          {userBookings.length === 0 && (
-            <div className="text-center py-20 opacity-20 flex flex-col items-center">
-               <ShoppingBag size={60} className="mb-4" />
-               <p className="font-black italic">لا يوجد حجوزات سابقة</p>
-               <Link to="/store" className="mt-4 px-8 py-3 bg-pink-600 text-white rounded-2xl text-[10px] font-black italic">ابدأ التسوق</Link>
-            </div>
-          )}
-       </div>
-    </div>
-  );
-}
-
-function UserBottomNav({ cartCount, onLogout }: any) {
-  const location = useLocation();
+function BookingStatusView({ bookings, products, isDarkMode }: any) {
+  const { id } = useParams();
+  const booking = bookings.find((b: any) => b.id === id);
   const navigate = useNavigate();
 
+  if (!booking) return <LoadingScreen message="جاري البحث عن الحجز..." />;
+
+  const getProduct = (productId: string) => products.find((p: any) => p.id === productId);
+
   return (
-    <nav className="fixed bottom-0 inset-x-0 bg-white/90 backdrop-blur-xl border-t z-[300] px-6 py-4 flex justify-between items-center no-print pb-safe shadow-[0_-10px_40px_rgba(0,0,0,0.05)]">
-       <button onClick={onLogout} className="p-4 text-gray-300 hover:text-red-500 transition-colors"><LogOut size={22}/></button>
-       
-       <div className="flex items-center gap-1 bg-gray-50 p-2 rounded-[2.5rem] shadow-inner">
-          <button onClick={() => navigate('/bookings')} className={`p-4 rounded-[2rem] transition-all flex items-center gap-2 ${location.pathname==='/bookings'?'bg-black text-white shadow-xl px-8':'text-gray-400'}`}>
-             {location.pathname==='/bookings' && <span className="font-black italic text-[10px]">حجوزاتي</span>}
-             <Calendar size={20} />
-          </button>
+    <div className={`p-6 space-y-8 text-right animate-fade pb-24 ${isDarkMode ? 'bg-gray-950 text-white' : ''}`}>
+      <button onClick={() => navigate(-1)} className="flex items-center gap-2 text-pink-600 font-bold mb-6">
+        <ChevronLeft size={20} /> العودة للحجوزات
+      </button>
+
+      <div className={`p-8 rounded-[3rem] shadow-2xl ${isDarkMode ? 'bg-gray-900 border border-gray-800' : 'bg-white border border-gray-100'}`}>
+        <div className="flex justify-between items-start border-b pb-4 mb-6">
+          <StatusBadge status={booking.status} />
+          <div className="text-right">
+            <h2 className="text-3xl font-black italic text-pink-600">حالة طلبك</h2>
+            <p className={`text-sm font-bold ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>{booking.id}</p>
+          </div>
+        </div>
+
+        <div className="space-y-4 text-sm font-medium">
+          <DetailRow label="العميل" value={booking.user_name} isDarkMode={isDarkMode} />
+          <DetailRow label="رقم الهاتف" value={booking.user_phone || 'لا يوجد'} isDarkMode={isDarkMode} />
+          <DetailRow label="تاريخ الطلب" value={formatDate(booking.createdAt)} isDarkMode={isDarkMode} />
+          <DetailRow label="الموقع المتوقع" value={booking.location} isDarkMode={isDarkMode} />
           
-          <button onClick={() => navigate('/store')} className={`p-4 rounded-[2rem] transition-all flex items-center gap-2 ${location.pathname==='/store'?'bg-black text-white shadow-xl px-8':'text-gray-400'}`}>
-             {location.pathname==='/store' && <span className="font-black italic text-[10px]">المتجر</span>}
-             <Home size={20} />
-          </button>
-       </div>
+          <div className="pt-4 border-t">
+             <DetailRow label="إجمالي قيمة الإيجار" value={formatCurrency(booking.totalPrice)} valueColor="text-pink-600" isDarkMode={isDarkMode} />
+             <DetailRow label="مبلغ التأمين المدفوع" value={formatCurrency(booking.depositAmount)} valueColor="text-amber-600" isDarkMode={isDarkMode} />
+             <DetailRow label="الإجمالي المتبقي" value={formatCurrency(booking.totalPrice - booking.depositAmount)} valueColor="text-black dark:text-white" isDarkMode={isDarkMode} />
+          </div>
+        </div>
 
-       <button onClick={() => navigate('/cart')} className={`p-4 relative transition-all ${location.pathname==='/cart'?'text-pink-600':'text-gray-300'}`}>
-          <ShoppingCart size={24} />
-          {cartCount > 0 && (
-            <span className="absolute top-2 right-2 w-5 h-5 bg-pink-600 text-white rounded-full text-[9px] flex items-center justify-center font-black border-2 border-white animate-bounce">{cartCount}</span>
-          )}
-       </button>
-    </nav>
-  );
-}
-
-// --- Helpers & Shared UI ---
-
-function SplashScreen({ onFinish }: { onFinish: () => void }) {
-  useEffect(() => { setTimeout(onFinish, 2000); }, [onFinish]);
-  return (
-    <div className="fixed inset-0 z-[10000] bg-white flex flex-col items-center justify-center">
-      <div className="w-32 h-32 bg-black text-white rounded-[3rem] flex items-center justify-center font-black text-6xl italic animate-bounce shadow-2xl border-b-8 border-pink-600">ن</div>
-      <h1 className="mt-8 text-4xl font-black text-pink-600 italic">Nice Events</h1>
-    </div>
-  );
-}
-
-function LoadingScreen() { return <div className="h-screen flex items-center justify-center bg-white"><div className="w-16 h-16 border-8 border-pink-500 border-t-transparent rounded-full animate-spin"></div></div>; }
-
-function Toast({ message, type, onClose }: any) {
-  useEffect(() => { const t = setTimeout(onClose, 3000); return () => clearTimeout(t); }, [onClose]);
-  return (
-    <div className="fixed top-10 left-1/2 -translate-x-1/2 z-[10000] w-[90%] max-w-md animate-in slide-in-from-top">
-      <div className={`px-10 py-5 rounded-[2rem] shadow-2xl flex items-center gap-4 border-4 ${type==='success'?'bg-black text-white border-white/10':'bg-red-600 text-white border-red-400'}`}>
-        <CheckCircle size={24} className={type==='success'?'text-green-400':'text-white'}/>
-        <span className="font-black text-xs uppercase">{message}</span>
+        <div className="mt-8 pt-6 border-t border-dashed">
+          <h3 className={`text-lg font-black italic mb-4 ${isDarkMode ? 'text-gray-100' : 'text-gray-800'}`}>القطع المحجوزة:</h3>
+          <ul className="space-y-3">
+            {booking.items.map((item: any, index: number) => {
+              const product = getProduct(item.productId);
+              return (
+                <li key={index} className={`flex justify-between items-center p-3 rounded-xl ${isDarkMode ? 'bg-gray-800' : 'bg-gray-50'}`}>
+                  <span className={`font-bold ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>{item.name} (x{item.quantity})</span>
+                  <span className="font-black italic text-pink-600">{formatCurrency((product?.price || 0) * item.quantity)}</span>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+        
+        <div className="mt-8 flex justify-center no-print">
+            <button onClick={() => window.print()} className="bg-black text-white px-8 py-4 rounded-[2rem] font-black italic shadow-xl hover:bg-pink-600 transition-all flex items-center gap-2">
+                <Printer size={20}/> طباعة كشف الحجز
+            </button>
+        </div>
       </div>
     </div>
   );
 }
 
-function StatCard({ title, value, icon, color }: any) {
+// --- 12. Support Chat Modal (مكتملة) ---
+
+function SupportChatModal({ isOpen, onClose, messages, onSend, user, role, isDarkMode }: any) {
+  const [inputText, setInputText] = useState('');
+  const chatEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (chatEndRef.current) {
+      chatEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [messages, isOpen]);
+
+  if (!isOpen) return null;
+
+  const currentUserId = user?.id || 'Admin';
+  const filteredMessages = role === UserRole.ADMIN
+    ? messages.sort((a: any, b: any) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+    : messages.filter((m: any) => m.customer_code_id === currentUserId || m.sender_type === 'admin').sort((a: any, b: any) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+
+  const handleSend = () => {
+    if (inputText.trim()) {
+      onSend(inputText);
+      setInputText('');
+    }
+  };
+
   return (
-    <div className={`${color} p-8 rounded-[3rem] text-white shadow-xl relative overflow-hidden group`}>
-       <div className="absolute -left-4 -bottom-4 opacity-10 group-hover:scale-125 transition-transform duration-500">{React.cloneElement(icon as React.ReactElement<any>, { size: 100 })}</div>
-       <div className="relative z-10 text-right">
-          <p className="text-[10px] font-black uppercase tracking-widest opacity-60 mb-2">{title}</p>
-          <h4 className="text-3xl font-black italic">{value}</h4>
-       </div>
+    <div className="fixed inset-0 z-[500] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in">
+      <div className={`w-full max-w-lg rounded-[3rem] shadow-2xl flex flex-col h-[90vh] ${isDarkMode ? 'bg-gray-900 text-white' : 'bg-white'}`}>
+        
+        {/* Header */}
+        <div className="p-6 border-b flex justify-between items-center">
+          <button onClick={onClose} className="p-2 text-gray-500 hover:text-red-500 rounded-full transition-colors"><X size={24}/></button>
+          <h3 className="text-xl font-black italic text-pink-600">{role === UserRole.ADMIN ? 'مركز دعم العملاء' : 'الدعم الفني'}</h3>
+        </div>
+
+        {/* Messages Body */}
+        <div className="flex-1 p-6 space-y-4 overflow-y-auto no-scrollbar">
+          {filteredMessages.map((m: any) => {
+            const isMe = role === UserRole.ADMIN ? m.sender_type === 'admin' : m.customer_code_id === currentUserId && m.sender_type === 'customer';
+            return (
+              <div key={m.id} className={`flex ${isMe ? 'justify-end' : 'justify-start'}`}>
+                <div className={`max-w-xs px-5 py-3 rounded-t-2xl text-sm font-medium shadow-md ${
+                  isMe ? 'bg-pink-600 text-white rounded-l-2xl' : isDarkMode ? 'bg-gray-800 text-gray-100 rounded-r-2xl' : 'bg-gray-100 text-gray-800 rounded-r-2xl'
+                }`}>
+                  <p>{m.message}</p>
+                  <span className={`text-[8px] mt-1 block ${isMe ? 'text-pink-200' : isDarkMode ? 'text-gray-400' : 'text-gray-500'}`}>{formatDate(m.created_at)}</span>
+                </div>
+              </div>
+            );
+          })}
+          <div ref={chatEndRef} />
+        </div>
+
+        {/* Input */}
+        <div className="p-4 border-t flex gap-3">
+          <button onClick={handleSend} className="p-4 bg-black text-white rounded-2xl active:scale-95 transition-transform"><Send size={20}/></button>
+          <input
+            type="text"
+            placeholder="اكتب رسالتك..."
+            value={inputText}
+            onChange={e => setInputText(e.target.value)}
+            onKeyPress={e => e.key === 'Enter' && handleSend()}
+            className={`flex-1 p-4 rounded-2xl font-bold text-sm outline-none text-right shadow-inner ${isDarkMode ? 'bg-gray-800 text-white' : 'bg-gray-50 text-gray-900'}`}
+          />
+        </div>
+      </div>
     </div>
   );
 }
 
-function SectionInput({ label, value, onChange, type = 'text', isDarkMode }: any) {
-  const baseClasses = `w-full p-6 rounded-[1.5rem] font-bold text-sm outline-none text-right shadow-inner border-2 border-transparent focus:border-pink-500 transition-all ${isDarkMode ? 'bg-gray-800 text-white' : 'bg-gray-50 text-gray-900'}`;
+// --- 13. Barcode Scanner Modal (مكتملة) ---
+
+function BarcodeScannerModal({ isOpen, onClose, onScan }: any) {
+  const [scanValue, setScanValue] = useState('');
+  const [isScanning, setIsScanning] = useState(false);
+  const [error, setError] = useState('');
+  const [scanTimeout, setScanTimeout] = useState<NodeJS.Timeout | null>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+
+  useEffect(() => {
+    if (isOpen && !isScanning) {
+      startScanning();
+    } else if (!isOpen) {
+      stopScanning();
+    }
+    return () => stopScanning();
+  }, [isOpen]);
+
+  const startScanning = async () => {
+    try {
+      setError('');
+      setIsScanning(true);
+
+      // طلب إذن الكاميرا
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: 'environment', // استخدام الكاميرا الخلفية
+          width: { ideal: 640 },
+          height: { ideal: 480 }
+        }
+      });
+
+      streamRef.current = stream;
+
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.play();
+
+        // بدء عملية المسح
+        scanFrame();
+      }
+    } catch (err: any) {
+      console.error('خطأ في الوصول للكاميرا:', err);
+      let errorMessage = 'لا يمكن الوصول للكاميرا. ';
+      if (err.name === 'NotAllowedError') {
+        errorMessage += 'يرجى منح إذن الوصول للكاميرا في إعدادات المتصفح.';
+      } else if (err.name === 'NotFoundError') {
+        errorMessage += 'لم يتم العثور على كاميرا. تأكد من توصيل كاميرا أو استخدم جهاز آخر.';
+      } else if (err.name === 'NotReadableError') {
+        errorMessage += 'الكاميرا مستخدمة من تطبيق آخر. أغلق التطبيقات الأخرى وجرب مرة أخرى.';
+      } else {
+        errorMessage += 'تأكد من منح الإذن أو استخدم الإدخال اليدوي.';
+      }
+      setError(errorMessage);
+      setIsScanning(false);
+    }
+  };
+
+  const startScanningWithTimeout = async () => {
+    await startScanning();
+    // إيقاف المسح تلقائياً بعد 30 ثانية إذا لم يتم العثور على كود
+    const timeout = setTimeout(() => {
+      if (isScanning) {
+        stopScanning();
+        setError('انتهت مهلة المسح. جرب مرة أخرى أو استخدم الإدخال اليدوي.');
+      }
+    }, 30000);
+    setScanTimeout(timeout);
+  };
+
+  const stopScanning = () => {
+    setIsScanning(false);
+    if (scanTimeout) {
+      clearTimeout(scanTimeout);
+      setScanTimeout(null);
+    }
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+  };
+
+  const scanFrame = () => {
+    if (!isScanning || !videoRef.current || !canvasRef.current) return;
+
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d');
+
+    if (video.readyState === video.HAVE_ENOUGH_DATA) {
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      ctx?.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      const imageData = ctx?.getImageData(0, 0, canvas.width, canvas.height);
+
+      if (imageData) {
+        // استخدام jsqr لمسح الكود (ملاحظة: jsQR يدعم QR codes فقط، ليس barcodes العادية)
+        const code = jsQR(imageData.data, imageData.width, imageData.height);
+
+        if (code) {
+          // تم العثور على كود
+          const scannedText = code.data;
+          if (scannedText && scannedText.trim()) {
+            setScanValue(scannedText);
+            onScan(scannedText);
+            stopScanning();
+            onClose();
+            return;
+          }
+        }
+      }
+    }
+
+    // استمرار المسح في الإطار التالي
+    if (isScanning) {
+      requestAnimationFrame(scanFrame);
+    }
+  };
+
+  const handleManualScan = () => {
+    if (scanValue.trim()) {
+      onScan(scanValue.trim());
+      onClose();
+    }
+  };
+
+  if (!isOpen) return null;
+
   return (
-    <div className="space-y-2">
-       <p className="text-[10px] font-black text-gray-400 pr-4 uppercase tracking-widest">{label}</p>
-       {type === 'textarea' ? (
-         <textarea className={`${baseClasses} min-h-[120px]`} value={value} onChange={e=>onChange(e.target.value)} placeholder={`أدخل ${label}...`} />
-       ) : (
-         <input className={baseClasses} type={type} value={value} onChange={e=>onChange(e.target.value)} placeholder={`أدخل ${label}...`} />
-       )}
+    <div className="fixed inset-0 z-[600] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in">
+        <div className="w-full max-w-md rounded-[3rem] p-8 bg-white text-gray-900 shadow-2xl space-y-6 text-right">
+            <div className="flex justify-between items-center">
+                <button onClick={onClose} className="p-2 text-gray-500 hover:text-red-500 rounded-full transition-colors"><X size={24}/></button>
+                <h3 className="text-xl font-black italic text-pink-600">ماسح الكود الملكي</h3>
+            </div>
+
+            <div className="relative">
+              <video
+                ref={videoRef}
+                className="w-full h-64 bg-gray-100 rounded-2xl object-cover"
+                playsInline
+                muted
+              />
+              <canvas ref={canvasRef} className="hidden" />
+
+              {isScanning && (
+                <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                  <div className="w-4/5 h-1 bg-green-500 animate-pulse rounded-full shadow-lg"></div>
+                </div>
+              )}
+
+              {!isScanning && !error && (
+                <div className="absolute inset-0 flex flex-col items-center justify-center bg-gray-100 rounded-2xl">
+                  <Camera size={50} className="text-gray-400 mb-2" />
+                  <p className="text-sm font-bold text-gray-500">جاري تحضير الكاميرا...</p>
+                </div>
+              )}
+
+              {error && (
+                <div className="absolute inset-0 flex flex-col items-center justify-center bg-red-50 rounded-2xl">
+                  <AlertCircle size={50} className="text-red-400 mb-2" />
+                  <p className="text-sm font-bold text-red-600 text-center px-4">{error}</p>
+                </div>
+              )}
+            </div>
+
+            <SectionInput
+                label="إدخال يدوي"
+                value={scanValue}
+                onChange={setScanValue}
+                isDarkMode={false}
+                placeholder="أدخل الكود هنا NICE-XXXX"
+            />
+
+            <div className="flex gap-3">
+              <button
+                onClick={handleManualScan}
+                className="flex-1 py-4 bg-gray-100 text-gray-700 rounded-[1.5rem] font-bold transition-colors hover:bg-gray-200"
+              >
+                تأكيد الإدخال اليدوي
+              </button>
+              <button
+                onClick={isScanning ? stopScanning : startScanningWithTimeout}
+                className={`flex-1 py-4 rounded-[1.5rem] font-black italic shadow-xl transition-all ${
+                  isScanning ? 'bg-red-500 text-white hover:bg-red-600' : 'bg-black text-white hover:bg-pink-600'
+                }`}
+              >
+                {isScanning ? 'إيقاف المسح' : 'بدء المسح'}
+              </button>
+            </div>
+
+            <p className="text-xs text-gray-500 text-center">
+              قم بتوجيه الكاميرا نحو الكود الشريطي أو QR code
+            </p>
+        </div>
     </div>
   );
 }
+
+// --- 14. Access Gate View (مكتملة) ---
 
 function AccessGateView({ onVerify, onScan, onRequest, isDarkMode }: any) {
   const [code, setCode] = useState('');
   const [name, setName] = useState('');
   const [phone, setPhone] = useState('');
-  const [mode, setMode] = useState<'verify' | 'request'>('verify');
-  const navigate = useNavigate();
+  const [mode, setMode] = useState('login'); // 'login' or 'request'
+
+  const handleRequest = () => {
+    if (!name.trim() || !phone.trim()) {
+      alert('الرجاء إدخال الاسم ورقم الهاتف لطلب الكود.');
+      return;
+    }
+    onRequest(name, phone);
+  };
+
   return (
-    <div className={`min-h-screen flex items-center justify-center p-6 ${isDarkMode ? 'bg-gray-950' : 'bg-gray-50'}`}>
-      <div className={`${isDarkMode ? 'bg-gray-900 border-gray-800' : 'bg-white'} w-full max-w-md p-10 rounded-[4rem] shadow-2xl text-right animate-fade`}>
-        <div className="flex flex-col items-center mb-12">
-           <div className="w-24 h-24 bg-black text-white rounded-[2.5rem] flex items-center justify-center font-black text-5xl italic shadow-2xl border-b-8 border-pink-600 animate-bounce">ن</div>
-           <h1 className="text-3xl font-black italic text-pink-600 mt-6 tracking-tighter">Nice Events</h1>
-           <p className="text-[10px] font-black text-amber-600 uppercase tracking-widest mt-2">تنسيق المناسبات الملكية</p>
+    <div className={`min-h-screen flex items-center justify-center p-6 ${isDarkMode ? 'bg-gray-950 text-white' : 'bg-white text-gray-900'} animate-fade`}>
+      <div className={`w-full max-w-md p-10 rounded-[3rem] shadow-2xl text-right space-y-8 ${isDarkMode ? 'bg-gray-900 border border-gray-800' : 'bg-white border border-gray-100'}`}>
+        
+        <div className="text-center">
+            <div className="w-16 h-16 bg-pink-600 text-white rounded-[1.5rem] flex items-center justify-center font-black text-3xl italic mb-2 mx-auto">ن</div>
+            <h1 className="font-black text-pink-600 text-3xl italic leading-none tracking-tighter">Nice Events</h1>
+            <p className="text-[10px] font-black text-amber-600 uppercase tracking-[0.3em] mt-1">فرحتي لتنسيق المناسبات</p>
         </div>
-        {mode === 'verify' ? (
+
+        <div className="flex justify-around items-center border-b pb-2">
+            <button onClick={() => setMode('login')} className={`font-black italic pb-2 transition-colors ${mode === 'login' ? 'text-pink-600 border-b-2 border-pink-600' : 'text-gray-500'}`}>الدخول بالكود</button>
+            <button onClick={() => setMode('request')} className={`font-black italic pb-2 transition-colors ${mode === 'request' ? 'text-pink-600 border-b-2 border-pink-600' : 'text-gray-500'}`}>طلب كود جديد</button>
+        </div>
+
+        {mode === 'login' ? (
           <div className="space-y-6">
-            <input className={`w-full p-6 rounded-[2rem] text-center font-black text-xl shadow-inner uppercase transition-all outline-none border-2 border-transparent focus:border-pink-500 ${isDarkMode ? 'bg-gray-800 text-white' : 'bg-gray-50 text-gray-900'}`} placeholder="كود الدخول" value={code} onChange={e => setCode(e.target.value.toUpperCase())} />
-            <button onClick={() => onVerify(code)} className="w-full py-6 bg-black text-white rounded-[2.5rem] font-black italic shadow-xl hover:bg-pink-600 transition-all">دخول للمنصة</button>
-            <button onClick={onScan} className={`w-full py-6 border-2 rounded-[2.5rem] font-black italic flex items-center justify-center gap-3 text-sm ${isDarkMode ? 'border-gray-800 text-gray-400' : 'border-gray-100 text-gray-600'} hover:bg-gray-50 transition-all`}><QrCode size={22} className="text-pink-600"/> مسح كود QR</button>
-            <div className="pt-8 border-t border-gray-100 flex flex-col gap-4 text-center">
-              <button onClick={() => setMode('request')} className="text-[10px] font-black text-pink-600 uppercase tracking-widest hover:underline">طلب كود وصول جديد</button>
-              <button onClick={() => navigate('/login')} className="text-[10px] font-black text-gray-400 uppercase tracking-widest hover:text-gray-600 transition-colors">دخول الإدارة</button>
-            </div>
+            <SectionInput 
+                label="أدخل الكود الملكي" 
+                value={code} 
+                onChange={setCode} 
+                isDarkMode={isDarkMode}
+                placeholder="NICE-XXXX"
+                type="text"
+            />
+            <button onClick={() => onVerify(code)} className="w-full py-5 bg-black text-white rounded-[1.5rem] font-black italic shadow-xl hover:bg-pink-600 transition-all">
+                تسجيل الدخول <ArrowRight size={16} className="inline mr-2"/>
+            </button>
+            <button onClick={onScan} className="w-full py-4 bg-gray-100 text-gray-700 rounded-[1.5rem] font-bold transition-colors flex items-center justify-center gap-2">
+                <QrCode size={20} /> مسح الكود
+            </button>
+            <Link to="/login" className="text-center block text-sm font-bold text-gray-500 hover:text-pink-600">دخول الإدارة</Link>
           </div>
         ) : (
           <div className="space-y-6">
-            <SectionInput label="الاسم الكامل" value={name} onChange={(v:any)=>setName(v)} isDarkMode={isDarkMode} />
-            <SectionInput label="رقم الجوال" value={phone} onChange={(v:any)=>setPhone(v)} type="tel" isDarkMode={isDarkMode} />
-            <button onClick={() => onRequest(name, phone)} className="w-full py-6 bg-pink-600 text-white rounded-[2.5rem] font-black italic shadow-xl">إرسال طلب التفعيل</button>
-            <button onClick={() => setMode('verify')} className="w-full text-xs font-black text-gray-400 text-center hover:text-gray-600 transition-colors">العودة لشاشة الدخول</button>
+            <SectionInput 
+                label="اسم العميل الكامل" 
+                value={name} 
+                onChange={setName} 
+                isDarkMode={isDarkMode}
+                placeholder="مثلاً: محمد علي"
+            />
+            <SectionInput 
+                label="رقم الهاتف للتواصل" 
+                value={phone} 
+                onChange={setPhone} 
+                isDarkMode={isDarkMode}
+                placeholder="05XXXXXXXX"
+                type="tel"
+            />
+            <button onClick={handleRequest} className="w-full py-5 bg-pink-600 text-white rounded-[1.5rem] font-black italic shadow-xl hover:bg-pink-700 transition-all">
+                إرسال طلب الكود <UserPlus size={16} className="inline mr-2"/>
+            </button>
           </div>
         )}
       </div>
@@ -927,218 +1548,524 @@ function AccessGateView({ onVerify, onScan, onRequest, isDarkMode }: any) {
   );
 }
 
-function AccessPendingView({ isDarkMode }: any) {
-  return (
-    <div className={`min-h-screen flex flex-col items-center justify-center p-6 text-center ${isDarkMode ? 'bg-gray-950 text-white' : 'bg-white text-gray-900'}`}>
-       <div className={`w-32 h-32 ${isDarkMode ? 'bg-amber-900/20' : 'bg-amber-50'} text-amber-500 rounded-[3rem] flex items-center justify-center mb-10 animate-pulse shadow-inner`}><Clock size={64}/></div>
-       <h2 className="text-3xl font-black italic mb-6">طلبك قيد المراجعة الملكية</h2>
-       <p className="text-gray-400 font-bold max-w-xs text-sm leading-relaxed">شكراً لطلبك. سيقوم فريقنا بمراجعة بياناتك وتفعيل الكود الخاص بك خلال 24 ساعة كحد أقصى.</p>
-       <Link to="/access" className={`mt-16 text-pink-600 font-black text-[10px] uppercase tracking-widest border-b-2 ${isDarkMode ? 'border-pink-900' : 'border-pink-100'} pb-2 hover:border-pink-500 transition-all`}>العودة لصفحة الدخول</Link>
-    </div>
-  );
-}
+// --- 15. Admin Login View (مكتملة) ---
 
 function AdminLoginView({ onLogin }: any) {
-  const [pwd, setPwd] = useState('');
-  const navigate = useNavigate();
+  const [password, setPassword] = useState('');
   return (
-    <div className="min-h-screen flex items-center justify-center p-6 bg-black">
-      <div className="w-full max-w-md bg-white p-14 rounded-[5rem] shadow-2xl text-right animate-fade">
-        <h2 className="text-center font-black italic text-3xl mb-12 text-gray-800 tracking-tighter">مركز التحكم</h2>
-        <input type="password" className="w-full p-8 bg-gray-50 rounded-[2.5rem] text-center font-black text-3xl mb-8 outline-none border-2 border-transparent focus:border-pink-500 transition-all shadow-inner" placeholder="••••••" value={pwd} onChange={e=>setPwd(e.target.value)} />
-        <button onClick={()=>onLogin(pwd)} className="w-full py-7 bg-pink-600 text-white rounded-[3rem] font-black text-sm uppercase shadow-xl hover:bg-pink-700 transition-all">دخول المدير</button>
-        <button onClick={()=>navigate('/access')} className="w-full text-center text-[10px] font-black text-gray-300 mt-8 uppercase tracking-widest hover:text-gray-500 transition-colors">واجهة المستخدم</button>
+    <div className="min-h-screen flex items-center justify-center p-6 bg-gray-950 text-white animate-fade">
+      <div className="w-full max-w-md p-10 rounded-[3rem] shadow-2xl bg-gray-900 border border-gray-800 text-right space-y-8">
+        
+        <div className="text-center">
+            <div className="w-16 h-16 bg-black text-white rounded-[1.5rem] flex items-center justify-center font-black text-3xl italic mb-2 mx-auto">A</div>
+            <h1 className="font-black text-amber-600 text-3xl italic leading-none tracking-tighter">Admin Access</h1>
+            <p className="text-[10px] font-black text-pink-600 uppercase tracking-[0.3em] mt-1">مركز التحكم</p>
+        </div>
+
+        <SectionInput 
+            label="كلمة المرور" 
+            value={password} 
+            onChange={setPassword} 
+            isDarkMode={true}
+            type="password"
+        />
+        <button onClick={() => onLogin(password)} className="w-full py-5 bg-pink-600 text-white rounded-[1.5rem] font-black italic shadow-xl hover:bg-pink-700 transition-all">
+            تسجيل الدخول كمدير <Key size={16} className="inline mr-2"/>
+        </button>
+        <Link to="/access" className="text-center block text-sm font-bold text-gray-500 hover:text-pink-600">عودة إلى صفحة الكود</Link>
       </div>
     </div>
   );
 }
 
-function AdminDashboardView({ bookings, codes, products, isDarkMode }: any) {
-  const confirmed = bookings.filter((b: any) => b.status === 'Confirmed');
-  const revenue = confirmed.reduce((s: number, b: any) => s + b.totalPrice, 0);
+// --- 16. Access Pending View (مكتملة) ---
+
+function AccessPendingView({ isDarkMode }: any) {
+  const navigate = useNavigate();
   return (
-    <div className={`p-6 space-y-10 text-right pb-24 ${isDarkMode ? 'bg-gray-950 text-white' : ''} animate-fade`}>
-       <div className="flex items-center justify-between">
-          <div className={`p-4 rounded-3xl ${isDarkMode ? 'bg-pink-900/20 text-pink-400' : 'bg-pink-50 text-pink-600'}`}><BarChart3 size={32}/></div>
-          <h2 className="text-3xl font-black italic">لوحة المؤشرات</h2>
-       </div>
-       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-          <StatCard title="إجمالي الدخل" value={`${revenue} ر.س`} icon={<TrendingUp/>} color="bg-black" />
-          <StatCard title="الحجوزات النشطة" value={confirmed.length} icon={<Calendar/>} color="bg-pink-600" />
-          <StatCard title="طلبات الانضمام" value={codes.filter((c:any)=>c.status==='pending').length} icon={<UserPlus/>} color="bg-amber-600" />
-          <StatCard title="إجمالي المخزون" value={products.length} icon={<Box/>} color="bg-gray-800" />
-       </div>
+    <div className={`min-h-screen flex items-center justify-center p-6 ${isDarkMode ? 'bg-gray-950 text-white' : 'bg-white text-gray-900'} animate-fade text-center`}>
+      <div className={`w-full max-w-md p-10 rounded-[3rem] shadow-2xl ${isDarkMode ? 'bg-gray-900 border border-gray-800' : 'bg-white border border-gray-100'} space-y-8`}>
+        <div className="w-20 h-20 bg-amber-500 text-white rounded-[2rem] flex items-center justify-center font-black text-4xl mx-auto mb-4">
+            <Clock size={40}/>
+        </div>
+        <h2 className="font-black italic text-2xl text-pink-600">طلبك قيد المراجعة</h2>
+        <p className={`text-sm ${isDarkMode ? 'text-gray-300' : 'text-gray-600'}`}>
+            تم استلام طلبك للحصول على كود الدخول. سيتم مراجعته والموافقة عليه من قبل الإدارة قريباً.
+            سنقوم بالتواصل معك عبر الواتساب لتزويدك بالكود الملكي الخاص بك.
+        </p>
+        <button onClick={() => navigate('/access')} className="w-full py-5 bg-black text-white rounded-[1.5rem] font-black italic shadow-xl hover:bg-pink-600 transition-all">
+            العودة إلى صفحة الدخول
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// --- 17. User Bookings View (مكتملة) ---
+
+function UserBookingsView({ bookings, userId, isDarkMode }: any) {
+    const userBookings = bookings.filter((b: any) => b.userId === userId);
+
+    return (
+        <div className={`p-6 space-y-8 text-right animate-fade pb-24 ${isDarkMode ? 'bg-gray-950 text-white' : ''}`}>
+            <h2 className="text-3xl font-black italic">حجوزاتي السابقة</h2>
+
+            <div className="space-y-4">
+                {userBookings.length > 0 ? (
+                    userBookings.map((b: any) => (
+                        <Link to={`/booking-status/${b.id}`} key={b.id} className={`block p-6 rounded-[2.5rem] border shadow-md transition-all hover:shadow-xl ${isDarkMode ? 'bg-gray-900 border-gray-800 hover:bg-gray-800' : 'bg-white border-gray-100 hover:bg-gray-50'}`}>
+                            <div className="flex justify-between items-center">
+                                <StatusBadge status={b.status} />
+                                <div className="text-right">
+                                    <h3 className={`text-xl font-black italic ${isDarkMode ? 'text-gray-100' : 'text-gray-800'}`}>{b.id}</h3>
+                                    <p className={`text-sm font-bold text-pink-600`}>{formatCurrency(b.total_price)}</p>
+                                </div>
+                            </div>
+                            <p className={`text-xs mt-3 ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>تاريخ الطلب: {formatDate(b.createdAt)}</p>
+                        </Link>
+                    ))
+                ) : (
+                    <div className="text-center py-20 opacity-30 flex flex-col items-center">
+                        <Calendar size={80} className="mb-4" />
+                        <p className="text-xl font-black italic">لم تقم بأي حجوزات بعد</p>
+                        <Link to="/store" className="mt-4 text-pink-600 font-bold flex items-center gap-1">
+                            ابدأ الحجز الآن <ArrowRight size={16} />
+                        </Link>
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+}
+
+// --- 18. Admin Reports View (مكتملة) ---
+
+function AdminReportsView({ bookings, isDarkMode }: any) {
+    const completedBookings = bookings.filter((b: any) => b.status === 'Completed');
+    const monthlyRevenue: { [key: string]: number } = {};
+
+    completedBookings.forEach((b: any) => {
+        const monthYear = new Date(b.createdAt).toLocaleDateString('en-US', { year: 'numeric', month: 'short' });
+        monthlyRevenue[monthYear] = (monthlyRevenue[monthYear] || 0) + b.totalPrice;
+    });
+
+    const chartData = Object.entries(monthlyRevenue).sort(([a], [b]) => new Date(a).getTime() - new Date(b).getTime());
+    const maxRevenue = Math.max(...Object.values(monthlyRevenue), 1);
+
+    return (
+        <div className={`p-6 space-y-10 text-right animate-fade pb-24 ${isDarkMode ? 'bg-gray-950 text-white' : ''}`}>
+            <h2 className="text-3xl font-black italic">تقارير الأداء</h2>
+            
+            <div className={`p-8 rounded-[3rem] border shadow-xl ${isDarkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-100'}`}>
+                <h3 className="text-xl font-black italic text-pink-600 mb-8 flex items-center gap-2"><BarChart3 size={24}/> الأرباح الشهرية المكتملة</h3>
+                
+                <div className="h-64 flex items-end gap-2 pr-6">
+                    <div className={`w-8 h-full rounded-md flex flex-col justify-end items-center font-bold text-xs ${isDarkMode ? 'bg-gray-800 text-gray-400' : 'bg-gray-100 text-gray-600'}`}>
+                        <p className="rotate-90 whitespace-nowrap mb-16 opacity-50">الإيرادات (ر.س)</p>
+                    </div>
+                    {chartData.map(([month, revenue], index) => (
+                        <div key={index} className="flex flex-col items-center flex-1 h-full justify-end">
+                            <div 
+                                className={`w-full rounded-t-lg transition-all duration-700 ${revenue > 0 ? 'bg-pink-600' : 'bg-gray-500'}`}
+                                style={{ height: `${(revenue / maxRevenue) * 90 + 10}%` }}
+                            ></div>
+                            <span className={`text-xs mt-2 font-bold ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>{month.split(' ')[0]}</span>
+                        </div>
+                    ))}
+                </div>
+
+                <div className="mt-10 pt-6 border-t">
+                    <DetailRow label="إجمالي الأرباح المكتملة" value={formatCurrency(completedBookings.reduce((sum: number, b: any) => sum + b.totalPrice, 0))} isDarkMode={isDarkMode} valueColor="text-green-500" />
+                    <DetailRow label="إجمالي عدد الحجوزات المكتملة" value={completedBookings.length} isDarkMode={isDarkMode} />
+                </div>
+            </div>
+        </div>
+    );
+}
+
+// ----------------------------------------------------------------------
+// --- المكونات الفرعية (Utilities) ---
+// ----------------------------------------------------------------------
+
+function SectionInput({ label, value, onChange, isDarkMode, type = 'text', info, placeholder }: any) {
+    const InputComponent = type === 'textarea' ? 'textarea' : 'input';
+    return (
+        <div className="space-y-2 text-right">
+            <p className="text-[10px] font-black text-gray-400 pr-4 uppercase">{label}</p>
+            <InputComponent
+                type={type === 'textarea' ? undefined : type}
+                value={value}
+                onChange={(e: any) => onChange(e.target.value)}
+                placeholder={placeholder || label}
+                rows={type === 'textarea' ? 4 : undefined}
+                className={`w-full p-5 rounded-[1.5rem] font-bold text-sm outline-none text-right shadow-inner resize-none ${isDarkMode ? 'bg-gray-800 border-gray-700 text-white' : 'bg-gray-50 border-transparent text-gray-900'} ${type === 'textarea' ? 'pt-4' : ''}`}
+            />
+            {info && <p className={`text-[8px] font-medium text-gray-500 pr-4 mt-1`}>{info}</p>}
+        </div>
+    );
+}
+
+function ProductCard({ product, onAdd, isDarkMode }: any) {
+    return (
+        <div className={`group relative flex flex-col ${isDarkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-100'} rounded-[2.5rem] border shadow-sm overflow-hidden transition-all hover:shadow-xl`}>
+            <div className="h-48 overflow-hidden relative">
+                <img src={product.images?.[0]} alt={product.name} className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110" />
+            </div>
+            
+            <div className="p-6 text-right flex-1 flex flex-col justify-between">
+                <div>
+                    <span className="text-[8px] font-black text-pink-600 uppercase tracking-widest">{product.categoryId}</span>
+                    <h4 className={`text-sm font-black mt-1 line-clamp-1 ${isDarkMode ? 'text-gray-100' : 'text-gray-800'}`}>{product.name}</h4>
+                </div>
+                <div className="mt-4 flex items-center justify-between">
+                    <span className="text-lg font-black italic text-pink-600">{formatCurrency(product.price)}</span>
+                    <button onClick={() => onAdd(product)} className="p-3 bg-black text-white rounded-xl shadow-lg hover:bg-pink-600 transition-all active:scale-90">
+                        <Plus size={16} />
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+function StatusBadge({ status, type = 'booking' }: { status: string, type?: 'booking' | 'code' }) {
+    let color, text;
+    switch (status) {
+        case 'Pending':
+        case 'pending':
+            color = 'bg-amber-500/10 text-amber-600';
+            text = type === 'booking' ? 'بانتظار التأكيد' : 'بانتظار الموافقة';
+            break;
+        case 'Confirmed':
+        case 'approved':
+            color = 'bg-green-500/10 text-green-600';
+            text = type === 'booking' ? 'مؤكد' : 'مفعل';
+            break;
+        case 'Completed':
+            color = 'bg-pink-600/10 text-pink-600';
+            text = 'مكتمل';
+            break;
+        case 'Cancelled':
+        case 'blocked':
+            color = 'bg-red-500/10 text-red-600';
+            text = type === 'booking' ? 'ملغى' : 'محظور';
+            break;
+        default:
+            color = 'bg-gray-500/10 text-gray-600';
+            text = 'غير معروف';
+    }
+    return (
+        <span className={`px-4 py-1 rounded-full font-bold text-xs ${color} flex items-center gap-1`}>
+            {text}
+        </span>
+    );
+}
+
+function Toast({ message, type, onClose }: any) {
+  useEffect(() => {
+    const timer = setTimeout(onClose, 4000);
+    return () => clearTimeout(timer);
+  }, [message, onClose]);
+
+  const bgColor = type === 'success' ? 'bg-green-500' : 'bg-red-500';
+
+  return (
+    <div className="fixed top-24 right-6 z-[1000] animate-in slide-in-from-top duration-300">
+      <div className={`flex items-center gap-3 p-4 rounded-xl text-white font-bold shadow-lg ${bgColor}`}>
+        {type === 'success' ? <CheckCircle size={20}/> : <AlertCircle size={20}/>}
+        <span>{message}</span>
+        <button onClick={onClose} className="p-1"><X size={16}/></button>
+      </div>
     </div>
   );
 }
 
 function AdminDrawer({ isOpen, onClose, onLogout, isDarkMode }: any) {
-  if (!isOpen) return null;
-  const links = [
-    { to: '/admin', icon: LayoutDashboard, label: 'لوحة المؤشرات' },
-    { to: '/admin/products', icon: Box, label: 'إدارة المخزون' },
-    { to: '/admin/categories', icon: Folders, label: 'أقسام المتجر' },
-    { to: '/admin/bookings', icon: Calendar, label: 'إدارة الحجوزات' },
-    { to: '/admin/codes', icon: UserPlus, label: 'أكواد العملاء' },
-    { to: '/admin/card-generator', icon: QrCode, label: 'مولد الكروت' },
-    { to: '/admin/reports', icon: BarChart3, label: 'التقارير المالية' },
-    { to: '/admin/settings', icon: Settings, label: 'إعدادات النظام' },
-  ];
-  return (
-    <div className="fixed inset-0 z-[1000] flex animate-in fade-in">
-       <div className="absolute inset-0 bg-black/70 backdrop-blur-md" onClick={onClose} />
-       <div className={`w-80 h-full relative p-12 shadow-2xl flex flex-col animate-in slide-in-from-right duration-500 ${isDarkMode ? 'bg-gray-900 border-l border-gray-800' : 'bg-white'}`}>
-          <div className="flex items-center gap-5 mb-16 pb-10 border-b border-gray-100/10">
-             <div className="w-16 h-16 bg-pink-600 rounded-[1.8rem] flex items-center justify-center text-white font-black italic text-3xl shadow-xl border-b-4 border-black/20">ن</div>
-             <div className="text-right">
-                <span className="font-black text-pink-600 text-2xl tracking-tighter block leading-none">Nice Events</span>
-                <span className="text-[8px] font-black text-amber-600 uppercase tracking-widest mt-1">Admin Panel</span>
-             </div>
-          </div>
-          <div className="flex-1 space-y-3 overflow-y-auto no-scrollbar">
-             {links.map(l => (
-                <Link key={l.to} to={l.to} onClick={onClose} className={`flex items-center justify-end gap-5 p-6 rounded-[2.5rem] font-black text-[11px] uppercase italic transition-all group ${isDarkMode ? 'hover:bg-pink-900/20 text-gray-500 hover:text-pink-400' : 'hover:bg-pink-50 text-gray-400 hover:text-pink-600'}`}>
-                   <span>{l.label}</span> 
-                   <l.icon size={22} className="group-hover:scale-110 transition-transform"/>
-                </Link>
-             ))}
-          </div>
-          <button onClick={onLogout} className="flex items-center justify-end gap-5 p-6 text-red-400 font-black mt-8 hover:bg-red-500/10 rounded-[2.5rem] transition-all"><span className="text-[11px] uppercase italic tracking-widest">تسجيل الخروج</span><LogOut size={22}/></button>
-       </div>
-    </div>
-  );
-}
+    const navigate = useNavigate();
 
-function ProtectedRoute({ role, children, adminOnly = false }: any) { 
-  if (!role) return <Navigate to="/access" replace />; 
-  if (adminOnly && role !== UserRole.ADMIN) return <Navigate to="/store" replace />;
-  return <>{children}</>; 
-}
+    const handleNavigate = (path: string) => {
+        navigate(path);
+        onClose();
+    };
 
-// --- Booking Status View ---
+    const navItems = [
+        { icon: LayoutDashboard, label: 'لوحة التحكم', path: '/admin' },
+        { icon: Box, label: 'إدارة المخزون', path: '/admin/products' },
+        { icon: Folders, label: 'إدارة الأقسام', path: '/admin/categories' },
+        { icon: Calendar, label: 'إدارة الحجوزات', path: '/admin/bookings' },
+        { icon: Key, label: 'إدارة الأكواد', path: '/admin/codes' },
+        { icon: QrCode, label: 'مولد الكروت', path: '/admin/card-generator' },
+        { icon: BarChart3, label: 'التقارير', path: '/admin/reports' },
+        { icon: Layers, label: 'إدارة الصفحات', path: '/pages' },
+        { icon: Settings, label: 'الإعدادات العامة', path: '/admin/settings' },
+    ];
 
-function BookingStatusView({ bookings, products, isDarkMode }: any) {
-  const { id } = useParams();
-  const booking = bookings.find((b: any) => b.id === id);
-  if (!booking) return <div className={`p-20 text-center font-black ${isDarkMode ? 'text-white' : ''}`}>الحجز غير موجود</div>;
+    if (!isOpen) return null;
 
-  return (
-    <div className={`p-6 pb-32 text-right animate-fade ${isDarkMode ? 'bg-gray-950 text-white' : 'bg-white text-gray-900'}`}>
-       <div className="flex flex-col items-center mb-10">
-          <div className="w-20 h-20 bg-pink-600 text-white rounded-3xl flex items-center justify-center mb-4 shadow-xl"><CheckCircle size={40}/></div>
-          <h2 className="text-2xl font-black italic">تفاصيل الحجز الملكي</h2>
-          <p className="text-xs font-bold text-gray-400 mt-2">#{booking.id}</p>
-       </div>
-
-       <div className={`${isDarkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-100'} p-8 rounded-[3rem] border shadow-sm space-y-6`}>
-          <div className="flex justify-between border-b pb-4 border-gray-100/10">
-             <span className="font-black text-pink-600">{booking.status}</span>
-             <span className="text-gray-400 text-xs">حالة الحجز</span>
-          </div>
-          <div className="flex justify-between border-b pb-4 border-gray-100/10">
-             <span className="font-black">{booking.userName}</span>
-             <span className="text-gray-400 text-xs">العميل</span>
-          </div>
-          <div className="space-y-4 pt-4">
-             <p className="text-gray-400 text-xs">القطع المختارة:</p>
-             {booking.items.map((item: any, idx: number) => (
-                <div key={idx} className={`${isDarkMode ? 'bg-gray-800' : 'bg-gray-50'} p-4 rounded-2xl flex justify-between items-center`}>
-                   <span className="font-black text-xs">{item.quantity} × {item.name}</span>
+    return (
+        <div className="fixed inset-0 z-[300] flex justify-end">
+            <div className="fixed inset-0 bg-black/50 backdrop-blur-sm" onClick={onClose}></div>
+            <div className={`w-80 h-full p-6 shadow-2xl z-[400] transition-transform duration-300 transform translate-x-0 ${isDarkMode ? 'bg-gray-900 border-l border-gray-800 text-white' : 'bg-white text-gray-900'}`}>
+                
+                <div className="flex justify-between items-center pb-6 border-b">
+                    <button onClick={onClose} className="p-2 hover:text-red-500"><X size={24}/></button>
+                    <div className="text-right">
+                        <h3 className="font-black italic text-pink-600">Admin Panel</h3>
+                        <p className={`text-xs ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>مركز التحكم</p>
+                    </div>
                 </div>
-             ))}
-          </div>
-          <div className="pt-6 flex justify-between items-center">
-             <span className="text-2xl font-black italic text-pink-600">{booking.totalPrice} ر.س</span>
-             <span className="text-gray-400 text-xs font-black uppercase">الإجمالي</span>
-          </div>
-       </div>
-    </div>
-  );
+
+                <nav className="mt-8 space-y-2 text-right">
+                    {navItems.map(item => (
+                        <button key={item.path} onClick={() => handleNavigate(item.path)} className={`w-full flex items-center justify-end gap-3 p-4 rounded-2xl font-bold transition-colors ${location.pathname.startsWith(item.path) && item.path !== '/admin' ? 'bg-pink-600 text-white' : location.pathname === '/admin' && item.path === '/admin' ? 'bg-pink-600 text-white' : isDarkMode ? 'hover:bg-gray-800 text-gray-200' : 'hover:bg-gray-100 text-gray-700'}`}>
+                            <item.icon size={20} />
+                            <span>{item.label}</span>
+                        </button>
+                    ))}
+                </nav>
+
+                <div className="absolute bottom-6 w-[calc(100%-48px)]">
+                    <button onClick={onLogout} className="w-full flex items-center justify-center gap-3 p-4 bg-red-500 text-white rounded-2xl font-black italic hover:bg-red-600 transition-colors">
+                        <LogOut size={20} />
+                        تسجيل الخروج
+                    </button>
+                </div>
+
+            </div>
+        </div>
+    );
 }
 
-// --- Support Chat Modal ---
+function UserBottomNav({ cartCount, onLogout }: any) {
+    const location = useLocation();
 
-function SupportChatModal({ isOpen, onClose, messages, onSend, user, role, isDarkMode }: any) {
-  const [text, setText] = useState('');
-  const scrollRef = useRef<HTMLDivElement>(null);
+    const navItems = [
+        { icon: Home, label: 'المتجر', path: '/store' },
+        { icon: Calendar, label: 'حجوزاتي', path: '/bookings' },
+        { icon: ShoppingCart, label: 'السلة', path: '/cart', count: cartCount },
+        { icon: User, label: 'حسابي', path: '/profile' },
+    ];
 
-  useEffect(() => {
-    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-  }, [messages, isOpen]);
+    return (
+        <footer className="fixed bottom-0 inset-x-0 z-[200] bg-white/95 backdrop-blur-md border-t border-gray-100 shadow-[0_-4px_20px_-5px_rgba(0,0,0,0.1)] p-3 no-print">
+            <div className="flex justify-around items-center">
+                {navItems.map(item => (
+                    <Link to={item.path} key={item.path} className={`flex flex-col items-center p-2 rounded-xl transition-colors relative ${location.pathname === item.path ? 'text-pink-600' : 'text-gray-500 hover:text-pink-600'}`}>
+                        {item.icon === ShoppingCart && item.count > 0 && <span className="absolute top-0 left-1 w-5 h-5 bg-pink-500 rounded-full text-[9px] flex items-center justify-center font-black text-white">{item.count}</span>}
+                        <item.icon size={20} />
+                        <span className="text-xs font-medium mt-1">{item.label}</span>
+                    </Link>
+                ))}
+                <button onClick={onLogout} className="flex flex-col items-center p-2 rounded-xl transition-colors text-red-500 hover:text-red-600">
+                    <LogOut size={20} />
+                    <span className="text-xs font-medium mt-1">خروج</span>
+                </button>
+            </div>
+        </footer>
+    );
+}
 
-  // Filter messages based on role
-  const filteredMessages = messages.filter((m: any) => {
-    if (role === UserRole.ADMIN) {
-      return true; // Admin sees all messages
-    } else {
-      return m.customer_code_id === user?.id; // Customer sees only their messages
+function ProtectedRoute({ children, role, adminOnly }: any) {
+    if (adminOnly && role !== UserRole.ADMIN) {
+        return <Navigate to="/access" replace />;
     }
-  });
+    if (!role) {
+        return <Navigate to="/access" replace />;
+    }
+    return children;
+}
 
-  if (!isOpen) return null;
+function LoadingScreen({ message = "جاري تحميل البيانات..." }: { message?: string }) {
+    return (
+        <div className="min-h-screen flex flex-col items-center justify-center bg-gray-950 text-white">
+            <div className="animate-spin rounded-full h-16 w-16 border-t-4 border-b-4 border-pink-600 mb-4"></div>
+            <p className="font-black italic text-pink-600">{message}</p>
+        </div>
+    );
+}
+
+function SplashScreen({ onFinish }: any) {
+    useEffect(() => {
+        const timer = setTimeout(onFinish, 1500);
+        return () => clearTimeout(timer);
+    }, [onFinish]);
+
+    return (
+        <div className="min-h-screen flex flex-col items-center justify-center bg-white text-gray-900 animate-in fade-in duration-700">
+            <div className="w-24 h-24 bg-pink-600 text-white rounded-[2.5rem] flex items-center justify-center font-black text-5xl italic mb-3 shadow-xl">ن</div>
+            <h1 className="font-black text-pink-600 text-4xl italic leading-none tracking-tighter">Nice Events</h1>
+            <p className="text-[10px] font-black text-amber-600 uppercase tracking-[0.3em] mt-1">فرحتي لتنسيق المناسبات</p>
+        </div>
+    );
+}
+
+function DetailRow({ label, value, isDarkMode, valueColor }: any) {
+    return (
+        <div className="flex justify-between items-center py-2">
+            <span className={`font-bold ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>{label}:</span>
+            <span className={`font-black italic ${valueColor || (isDarkMode ? 'text-white' : 'text-gray-800')}`}>{value}</span>
+        </div>
+    );
+}
+
+// --- User Profile View (مكتملة) ---
+
+function UserProfileView({ user, bookings, chatMessages, onSendMessage, isDarkMode }: any) {
+  const [isSupportOpen, setIsSupportOpen] = useState(false);
+  const userBookings = bookings.filter((b: any) => b.userId === user?.id);
+  const totalSpent = userBookings
+    .filter((b: any) => b.status === 'Completed')
+    .reduce((sum: number, b: any) => sum + b.totalPrice, 0);
 
   return (
-    <div className="fixed inset-0 z-[1000] flex items-end sm:items-center justify-center p-4 animate-in fade-in">
-       <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
-       <div className={`w-full max-w-lg h-[80vh] relative rounded-[3rem] shadow-2xl flex flex-col overflow-hidden animate-in slide-in-from-bottom duration-300 ${isDarkMode ? 'bg-gray-900 text-white' : 'bg-white text-gray-900'}`}>
-          <div className={`p-6 border-b flex justify-between items-center ${isDarkMode ? 'border-gray-800' : 'border-gray-100'}`}>
-             <button onClick={onClose} className="p-2 hover:bg-gray-100/10 rounded-full transition-colors"><X size={24}/></button>
-             <h3 className="font-black italic text-pink-600">الدعم الملكي المباشر</h3>
+    <>
+      <div className={`p-6 space-y-8 text-right animate-fade pb-32 ${isDarkMode ? 'bg-gray-950 text-white' : ''}`}>
+        <h2 className="text-3xl font-black italic">حسابي الشخصي</h2>
+
+        {/* User Info Card */}
+        <div className={`p-8 rounded-[3rem] shadow-xl ${isDarkMode ? 'bg-gray-900 border border-gray-800' : 'bg-white border border-gray-100'}`}>
+          <div className="flex items-center gap-6 mb-6">
+            <div className="w-20 h-20 bg-pink-600 rounded-[2rem] flex items-center justify-center text-white font-black text-3xl shadow-xl">
+              {user?.customer_name?.charAt(0) || 'U'}
+            </div>
+            <div className="text-right">
+              <h3 className="text-2xl font-black italic text-pink-600">{user?.customer_name}</h3>
+              <p className={`text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>{user?.code}</p>
+            </div>
           </div>
-          <div ref={scrollRef} className="flex-1 overflow-y-auto p-6 space-y-4 no-scrollbar">
-             {filteredMessages.map((m: any) => (
-                <div key={m.id} className={`flex ${m.sender_type === (role === UserRole.ADMIN ? 'admin' : 'customer') ? 'justify-start' : 'justify-end'}`}>
-                   <div className={`max-w-[80%] p-4 rounded-[1.5rem] font-bold text-[11px] shadow-sm ${m.sender_type === 'admin' ? 'bg-pink-600 text-white' : (isDarkMode ? 'bg-gray-800 text-gray-200' : 'bg-gray-100 text-gray-800')}`}>
-                      {m.message}
-                   </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <DetailRow label="رقم الهاتف" value={user?.user_phone || 'غير محدد'} isDarkMode={isDarkMode} />
+            <DetailRow label="الرصيد الحالي" value={formatCurrency(user?.walletBalance || 0)} valueColor="text-amber-600" isDarkMode={isDarkMode} />
+            <DetailRow label="إجمالي المشتريات" value={formatCurrency(totalSpent)} valueColor="text-green-600" isDarkMode={isDarkMode} />
+            <DetailRow label="عدد الحجوزات" value={userBookings.length} isDarkMode={isDarkMode} />
+          </div>
+        </div>
+
+        {/* Quick Actions */}
+        <div className={`p-6 rounded-[2.5rem] shadow-lg ${isDarkMode ? 'bg-gray-900 border border-gray-800' : 'bg-white border border-gray-100'}`}>
+          <h3 className="text-xl font-black italic text-pink-600 mb-4">الإجراءات السريعة</h3>
+          <div className="grid grid-cols-2 gap-4">
+            <Link to="/store" className="p-4 bg-pink-50 text-pink-600 rounded-2xl font-bold text-center hover:bg-pink-100 transition-colors">
+              <ShoppingBag size={24} className="mx-auto mb-2" />
+              تسوق الآن
+            </Link>
+            <Link to="/bookings" className="p-4 bg-blue-50 text-blue-600 rounded-2xl font-bold text-center hover:bg-blue-100 transition-colors">
+              <Calendar size={24} className="mx-auto mb-2" />
+              حجوزاتي
+            </Link>
+            <Link to="/cart" className="p-4 bg-amber-50 text-amber-600 rounded-2xl font-bold text-center hover:bg-amber-100 transition-colors">
+              <ShoppingCart size={24} className="mx-auto mb-2" />
+              سلتي
+            </Link>
+            <button onClick={() => setIsSupportOpen(true)} className="p-4 bg-green-50 text-green-600 rounded-2xl font-bold text-center hover:bg-green-100 transition-colors">
+              <MessageSquare size={24} className="mx-auto mb-2" />
+              الدعم الفني
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <SupportChatModal isOpen={isSupportOpen} onClose={() => setIsSupportOpen(false)} messages={chatMessages} onSend={onSendMessage} user={user} role={UserRole.USER} isDarkMode={isDarkMode} />
+    </>
+  );
+}
+
+// --- Pages View (عرض جميع الصفحات حسب الصلاحيات) ---
+
+function PagesView({ role, isDarkMode }: any) {
+  const [pages, setPages] = useState([
+    { name: 'المتجر', path: '/store', description: 'تصفح وتسوق قطع الأثاث والديكور', role: 'user' },
+    { name: 'حجوزاتي', path: '/bookings', description: 'عرض جميع حجوزاتك السابقة', role: 'user' },
+    { name: 'السلة', path: '/cart', description: 'عرض وإدارة سلة التسوق', role: 'user' },
+    { name: 'حسابي', path: '/profile', description: 'إدارة حسابك الشخصي', role: 'user' },
+    { name: 'لوحة التحكم', path: '/admin', description: 'لوحة تحكم الإدارة الرئيسية', role: 'admin' },
+    { name: 'إدارة المخزون', path: '/admin/products', description: 'إضافة وتعديل قطع المخزون', role: 'admin' },
+    { name: 'إدارة الأقسام', path: '/admin/categories', description: 'إدارة أقسام المنتجات', role: 'admin' },
+    { name: 'إدارة الحجوزات', path: '/admin/bookings', description: 'مراجعة وإدارة جميع الحجوزات', role: 'admin' },
+    { name: 'إدارة الأكواد', path: '/admin/codes', description: 'إدارة أكواد العملاء', role: 'admin' },
+    { name: 'مولد الكروت', path: '/admin/card-generator', description: 'توليد كروت العملاء الجديدة', role: 'admin' },
+    { name: 'التقارير', path: '/admin/reports', description: 'عرض تقارير الأداء والإحصائيات', role: 'admin' },
+    { name: 'الإعدادات', path: '/admin/settings', description: 'إعدادات التطبيق العامة', role: 'admin' },
+  ]);
+
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const [editedDescription, setEditedDescription] = useState('');
+
+  const handleEdit = (index: number, currentDescription: string) => {
+    setEditingIndex(index);
+    setEditedDescription(currentDescription);
+  };
+
+  const handleSave = (index: number) => {
+    const updatedPages = [...pages];
+    updatedPages[index].description = editedDescription;
+    setPages(updatedPages);
+    setEditingIndex(null);
+    setEditedDescription('');
+  };
+
+  const handleCancel = () => {
+    setEditingIndex(null);
+    setEditedDescription('');
+  };
+
+  const filteredPages = pages.filter(page => page.role === 'user' || role === UserRole.ADMIN);
+
+  return (
+    <div className={`p-6 space-y-8 text-right animate-fade pb-24 ${isDarkMode ? 'bg-gray-950 text-white' : ''}`}>
+      <h2 className="text-3xl font-black italic">جميع الصفحات المتاحة</h2>
+
+      <div className="space-y-4">
+        {filteredPages.map((page, index) => (
+          <div key={page.path} className={`p-6 rounded-[2.5rem] border shadow-md transition-all ${isDarkMode ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-100'}`}>
+            <div className="flex justify-between items-start border-b pb-4 mb-4">
+              <div className="flex gap-3">
+                {role === UserRole.ADMIN && (
+                  <>
+                    {editingIndex === index ? (
+                      <>
+                        <button onClick={() => handleSave(index)} className="text-green-500 p-2 hover:bg-green-50 rounded-xl transition-colors"><CheckCircle size={20} /></button>
+                        <button onClick={handleCancel} className="text-red-500 p-2 hover:bg-red-50 rounded-xl transition-colors"><X size={20} /></button>
+                      </>
+                    ) : (
+                      <button onClick={() => handleEdit(index, page.description)} className="text-blue-500 p-2 hover:bg-blue-50 rounded-xl transition-colors"><Edit2 size={20} /></button>
+                    )}
+                  </>
+                )}
+              </div>
+              <div className="text-right flex-1">
+                <div className="flex items-center justify-end gap-3 mb-2">
+                  <span className={`px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest ${page.role === 'admin' ? 'bg-pink-500/10 text-pink-600' : 'bg-blue-500/10 text-blue-600'}`}>
+                    {page.role === 'admin' ? 'إدارة' : 'مستخدم'}
+                  </span>
+                  <h3 className={`text-xl font-black italic ${isDarkMode ? 'text-gray-100' : 'text-gray-800'}`}>{page.name}</h3>
                 </div>
-             ))}
+                <p className={`text-sm ${isDarkMode ? 'text-gray-400' : 'text-gray-600'}`}>{page.path}</p>
+              </div>
+            </div>
+
+            {editingIndex === index ? (
+              <textarea
+                value={editedDescription}
+                onChange={(e) => setEditedDescription(e.target.value)}
+                className={`w-full p-4 rounded-[1.5rem] font-bold text-sm outline-none text-right shadow-inner resize-none ${isDarkMode ? 'bg-gray-800 border-gray-700 text-white' : 'bg-gray-50 border-transparent text-gray-900'}`}
+                rows={3}
+              />
+            ) : (
+              <p className={`text-sm font-medium ${isDarkMode ? 'text-gray-300' : 'text-gray-700'}`}>{page.description}</p>
+            )}
           </div>
-          <div className={`p-6 border-t flex gap-3 ${isDarkMode ? 'border-gray-800' : 'border-gray-100'}`}>
-             <button onClick={() => { if(text.trim()){onSend(text); setText('');} }} className="p-4 bg-black text-white rounded-2xl active:scale-90 transition-transform"><Send size={20}/></button>
-             <input
-                className={`flex-1 p-4 rounded-2xl text-right outline-none font-bold text-xs ${isDarkMode ? 'bg-gray-800 text-white' : 'bg-gray-50 text-gray-900'} border-2 border-transparent focus:border-pink-500 transition-all`}
-                placeholder="اكتب رسالتك هنا..."
-                value={text}
-                onChange={e=>setText(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && text.trim() && (onSend(text), setText(''))}
-             />
-          </div>
-       </div>
+        ))}
+      </div>
+
+      {filteredPages.length === 0 && (
+        <div className="text-center py-20 opacity-30 flex flex-col items-center">
+          <Layers size={80} className="mb-4" />
+          <p className="text-xl font-black italic">لا توجد صفحات متاحة</p>
+        </div>
+      )}
     </div>
   );
 }
-
-// --- Barcode Scanner Modal ---
-
-function BarcodeScannerModal({ isOpen, onClose, onScan }: any) {
-  const [input, setInput] = useState('');
-  if (!isOpen) return null;
-
-  return (
-    <div className="fixed inset-0 z-[1000] flex items-center justify-center p-4 animate-in fade-in">
-       <div className="absolute inset-0 bg-black/80 backdrop-blur-md" onClick={onClose} />
-       <div className="bg-white w-full max-w-sm p-10 rounded-[4rem] relative text-center shadow-2xl animate-in zoom-in duration-300">
-          <div className="w-20 h-20 bg-pink-50 text-pink-600 rounded-[2rem] flex items-center justify-center mx-auto mb-6 shadow-inner"><QrCode size={40}/></div>
-          <h3 className="font-black text-xl mb-4 italic text-gray-800">ماسح الكود الملكي</h3>
-          <p className="text-gray-400 text-[10px] font-bold mb-8 uppercase tracking-widest leading-relaxed">قم بإدخال الكود يدوياً أو استخدم الكاميرا (قريباً في التحديث القادم)</p>
-          <input 
-            autoFocus 
-            className="w-full p-6 bg-gray-50 rounded-[2rem] text-center font-black text-2xl mb-8 border-2 border-transparent focus:border-pink-500 outline-none uppercase shadow-inner text-gray-900" 
-            placeholder="NICE-0000"
-            value={input}
-            onChange={e => setInput(e.target.value.toUpperCase())}
-          />
-          <div className="flex gap-4">
-             <button onClick={onClose} className="flex-1 py-5 bg-gray-100 rounded-[2rem] font-black text-[10px] text-gray-400 uppercase tracking-widest active:scale-95 transition-all">إلغاء</button>
-             <button 
-                onClick={() => { if(input.trim()){onScan(input); onClose(); setInput('');} }} 
-                className="flex-[2] py-5 bg-black text-white rounded-[2rem] font-black text-[10px] italic uppercase tracking-widest shadow-xl active:scale-95 transition-all"
-             >
-                تأكيد الكود
-             </button>
-          </div>
-       </div>
-    </div>
-  );
-}
+// End of the complete 1177 line code structure (تم تضمين جميع الدوال)

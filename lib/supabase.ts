@@ -1,9 +1,8 @@
-
 import { createClient } from '@supabase/supabase-js';
 
 // يتم جلب البيانات من البيئة البرمجية، وفي حال عدم وجودها يتم استخدام قيم افتراضية للتطوير
-const supabaseUrl = process.env.SUPABASE_URL || 'https://nhjlwzwidmprbfkymlig.supabase.co';
-const supabaseKey = process.env.SUPABASE_ANON_KEY || 'sb_publishable_wjgWrle5o7WOR7MNdkStow_buZCxdlw';
+const supabaseUrl = process.env.SUPABASE_URL || 'https://bsvndoharrcopsnnfspp.supabase.co';
+const supabaseKey = process.env.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJzdm5kb2hhcnJjb3Bzbm5mc3BwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njg2NjIxMzAsImV4cCI6MjA4NDIzODEzMH0.SRuuoSHejzVsmOrVMVa3eB-bLynr-I_A32nzid2uTNw';
 
 export const supabase = createClient(supabaseUrl, supabaseKey);
 
@@ -14,14 +13,16 @@ export const supabaseOperation = async (
   type: 'get' | 'set' | 'update' | 'delete',
   table: string,
   data?: any,
-  id?: string
+  id?: string,
+  options?: { select?: string }
 ) => {
   try {
     switch (type) {
       case 'get':
+        const select = options?.select || '*';
         const { data: getData, error: getError } = await supabase
           .from(table)
-          .select('*')
+          .select(select)
           .order('created_at', { ascending: false });
         if (getError) throw getError;
         return { success: true, data: getData };
@@ -32,14 +33,14 @@ export const supabaseOperation = async (
           .upsert({ ...data, id: id || undefined })
           .select();
         if (setError) throw setError;
-        return setData;
+        return { success: true, data: setData };
 
       case 'update':
+        // لا تستخدم select مع update (Supabase REST لا يدعم ذلك)
         const { data: updateData, error: updateError } = await supabase
           .from(table)
           .update(data)
-          .eq('id', id)
-          .select();
+          .eq('id', id);
         if (updateError) throw updateError;
         return { success: true, data: updateData };
 
@@ -88,7 +89,7 @@ export const subscribeToProducts = (callback: (products: any[]) => void) => {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, (payload) => {
       console.log('Products change:', payload);
       // إعادة جلب البيانات عند أي تغيير
-      supabaseOperation('get', 'products').then(res => res.success ? callback(res.data) : null);
+      supabaseOperation('get', 'products').then(res => (res as any).success ? callback((res as any).data) : null);
     })
     .subscribe();
 };
@@ -100,7 +101,7 @@ export const subscribeToCategories = (callback: (categories: any[]) => void) => 
     .on('postgres_changes', { event: '*', schema: 'public', table: 'categories' }, (payload) => {
       console.log('Categories change:', payload);
       // إعادة جلب البيانات عند أي تغيير
-      supabaseOperation('get', 'categories').then(res => res.success ? callback(res.data) : null);
+      supabaseOperation('get', 'categories').then(res => (res as any).success ? callback((res as any).data || []) : callback([]));
     })
     .subscribe();
 };
@@ -112,7 +113,7 @@ export const subscribeToBookings = (callback: (bookings: any[]) => void) => {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'bookings' }, (payload) => {
       console.log('Bookings change:', payload);
       // إعادة جلب البيانات عند أي تغيير
-      supabaseOperation('get', 'bookings').then(res => res.success ? callback(res.data) : null);
+      supabaseOperation('get', 'bookings').then(res => (res as any).success ? callback((res as any).data) : null);
     })
     .subscribe();
 };
@@ -124,7 +125,7 @@ export const subscribeToCustomerCodes = (callback: (codes: any[]) => void) => {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'customer_codes' }, (payload) => {
       console.log('Customer codes change:', payload);
       // إعادة جلب البيانات عند أي تغيير
-      supabaseOperation('get', 'customer_codes').then(res => res.success ? callback(res.data) : null);
+      supabaseOperation('get', 'customer_codes').then(res => (res as any).success ? callback((res as any).data) : null);
     })
     .subscribe();
 };
@@ -136,7 +137,47 @@ export const subscribeToMessages = (callback: (messages: any[]) => void) => {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'chat_messages' }, (payload) => {
       console.log('Messages change:', payload);
       // إعادة جلب البيانات عند أي تغيير
-      supabaseOperation('get', 'chat_messages').then(res => res.success ? callback(res.data) : null);
+      supabaseOperation('get', 'chat_messages').then(res => (res as any).success ? callback((res as any).data) : null);
     })
     .subscribe();
+};
+
+// اشتراك في الإشعارات
+export const subscribeToNotifications = (callback: (notifications: any[]) => void) => {
+  return supabase
+    .channel('notifications_changes')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'notifications' }, (payload) => {
+      console.log('Notifications change:', payload);
+      // إعادة جلب البيانات عند أي تغيير
+      supabaseOperation('get', 'notifications').then(res => (res as any).success ? callback((res as any).data) : null);
+    })
+    .subscribe();
+};
+
+// إرسال إشعار لجميع المستخدمين
+export const sendGlobalNotification = async (title: string, message: string, type: 'info' | 'success' | 'warning' | 'error' = 'info') => {
+  const id = `notif-${Date.now()}`;
+  return await supabaseOperation('set', 'notifications', {
+    id,
+    title,
+    message,
+    type,
+    target_user_id: null, // null للجميع
+    created_at: new Date().toISOString(),
+    is_read: false
+  }, id);
+};
+
+// إرسال إشعار لمستخدم محدد
+export const sendUserNotification = async (userId: string, title: string, message: string, type: 'info' | 'success' | 'warning' | 'error' = 'info') => {
+  const id = `notif-${Date.now()}`;
+  return await supabaseOperation('set', 'notifications', {
+    id,
+    title,
+    message,
+    type,
+    target_user_id: userId,
+    created_at: new Date().toISOString(),
+    is_read: false
+  }, id);
 };

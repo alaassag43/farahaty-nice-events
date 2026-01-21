@@ -4,12 +4,12 @@ import { getFirestore, collection, doc, setDoc, getDocs, updateDoc, deleteDoc, q
 import { getStorage, ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 
 const firebaseConfig = {
-  apiKey: "PLACEHOLDER",
-  authDomain: "PLACEHOLDER",
-  projectId: "PLACEHOLDER",
-  storageBucket: "PLACEHOLDER",
-  messagingSenderId: "PLACEHOLDER",
-  appId: "PLACEHOLDER"
+  apiKey: "AIzaSyAxk-19S_g7Ad9PMydLmLsRDIf-va5ZsNg",
+  authDomain: "farahaty-nice-events.firebaseapp.com",
+  projectId: "farahaty-nice-events",
+  storageBucket: "farahaty-nice-events.firebasestorage.app",
+  messagingSenderId: "975596848066",
+  appId: "1:975596848066:web:d58f45564abebcb31acc5b"
 };
 
 let db: any = null;
